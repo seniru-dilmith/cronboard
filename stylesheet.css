@@ -1,0 +1,18 @@
+.cronboard-failed {
+    color: #e01b24;
+}
+
+.cronboard-warning {
+    color: #e5a50a;
+}
+
+.cronboard-run-button {
+    padding: 6px;
+    margin: 0 6px;
+    border-radius: 99px;
+}
+
+.cronboard-run-button:hover,
+.cronboard-run-button:focus {
+    background-color: rgba(127, 127, 127, 0.25);
+}
