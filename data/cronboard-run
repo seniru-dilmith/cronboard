@@ -1,0 +1,22 @@
+#!/bin/sh
+# Cronboard job runner. Cron calls it as:  cronboard-run <id> '<command>'
+# It runs the command the way cron would, then records the exit status and the
+# last 64 KB of output in $XDG_STATE_HOME/cronboard/<id>.status and <id>.log.
+# The output is printed afterwards, so cron mails it just as before.
+
+id=$1
+cmd=$2
+dir=${XDG_STATE_HOME:-$HOME/.local/state}/cronboard
+
+# Recording is best effort: if it can't be set up, just run the job.
+mkdir -p "$dir" 2>/dev/null
+out=$(mktemp "$dir/.$id.XXXXXX" 2>/dev/null) || exec "${SHELL:-/bin/sh}" -c "$cmd"
+
+"${SHELL:-/bin/sh}" -c "$cmd" >"$out" 2>&1
+status=$?
+
+cat "$out"
+(umask 077 && tail -c 65536 "$out" >"$out.log") && mv -f "$out.log" "$dir/$id.log"
+printf '%s %s\n' "$status" "$(date +%s)" >"$out.status" && mv -f "$out.status" "$dir/$id.status"
+rm -f "$out"
+exit "$status"
