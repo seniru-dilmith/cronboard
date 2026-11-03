@@ -1,4 +1,4 @@
 node_modules/
 dist/
 *.shell-extension.zip
-docs/
+/docs
