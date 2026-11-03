@@ -9,7 +9,7 @@ cmd=$2
 dir=${XDG_STATE_HOME:-$HOME/.local/state}/cronboard
 
 # Recording is best effort: if it can't be set up, just run the job.
-mkdir -p "$dir" 2>/dev/null
+(umask 077 && mkdir -p "$dir") 2>/dev/null
 out=$(mktemp "$dir/.$id.XXXXXX" 2>/dev/null) || exec "${SHELL:-/bin/sh}" -c "$cmd"
 
 "${SHELL:-/bin/sh}" -c "$cmd" >"$out" 2>&1
