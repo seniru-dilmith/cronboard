@@ -139,6 +139,34 @@ export function logFile(command: string, home: string): string | null {
     return null;
 }
 
+// A trailing `>> file 2>&1`, the form the editor's Log file field writes.
+const LOG_SUFFIX = /\s+>>\s*((?:\\.|[^\s;&|<>'"\\]|'[^']*'|"[^"]*")+)\s+2>&1\s*$/;
+
+/** Splits the editor's log file off a command, or returns log null if it doesn't end in one. */
+export function splitLog(command: string): {command: string; log: string | null} {
+    const m = LOG_SUFFIX.exec(command);
+    if (!m)
+        return {command, log: null};
+    return {command: command.slice(0, m.index), log: m[1].replace(/'([^']*)'|"([^"]*)"|\\(.)/g, '$1$2$3')};
+}
+
+/** Appends `>> log 2>&1`, quoting the path when needed but keeping a leading `~/` so the shell expands it. */
+export function withLog(command: string, log: string): string {
+    log = log.trim();
+    if (!log)
+        return command;
+    const quote = (s: string) => /^[\w./+-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`;
+    const path = log.startsWith('~/') ? `~/${quote(log.slice(2))}` : quote(log);
+    return `${command} >> ${path} 2>&1`;
+}
+
+/** A log file for a new job, named after the job or its program. */
+export function defaultLog(name: string, command: string): string {
+    const program = command.trim().split(/\s+/)[0]?.split('/').pop()?.replace(/\.\w+$/, '') ?? '';
+    const slug = (name.trim() || program).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    return `~/.local/state/cronboard/logs/${slug || 'job'}.log`;
+}
+
 function spliced(lines: Line[], start: number, remove: number, ...add: string[]): Line[] {
     const copy = lines.slice();
     copy.splice(start, remove, ...add.map(parseLine));

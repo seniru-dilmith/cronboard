@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parse, serialize, jobs, setEnabled, updateJob, addJob, deleteJob, splitPercent, logFile, DISABLED_MARKER}
+import {parse, serialize, jobs, setEnabled, updateJob, addJob, deleteJob, splitPercent, logFile, splitLog, withLog, defaultLog, DISABLED_MARKER}
     from '../src/lib/parser.ts';
 
 const RUNNER = '/home/me/.local/share/cronboard/cronboard-run';
@@ -172,4 +172,22 @@ test('logFile finds where a command writes its output', () => {
     ];
     for (const [command, expected] of cases)
         assert.equal(logFile(command, home), expected, command);
+});
+
+test('withLog and splitLog round-trip the log file field', () => {
+    for (const log of ['~/logs/a.log', '/var/tmp/b.log', '~/my logs/c.log', "/x/it's.log"]) {
+        const command = withLog('/x/sync.sh --all', log);
+        assert.deepEqual(splitLog(command), {command: '/x/sync.sh --all', log}, command);
+        assert.notEqual(logFile(command, '/home/me'), null, command);
+    }
+    assert.equal(withLog('/x/sync.sh', '~/my logs/c.log'), "/x/sync.sh >> ~/'my logs/c.log' 2>&1");
+    assert.equal(withLog('echo hi', '  '), 'echo hi');
+    assert.deepEqual(splitLog('run.sh > out.log'), {command: 'run.sh > out.log', log: null});
+    assert.deepEqual(splitLog('run.sh 2>&1 >> out.log'), {command: 'run.sh 2>&1 >> out.log', log: null});
+});
+
+test('defaultLog is named after the job, then its program', () => {
+    assert.equal(defaultLog('Back up photos', 'rsync -a ~/Pictures /mnt'), '~/.local/state/cronboard/logs/back-up-photos.log');
+    assert.equal(defaultLog('', '/home/me/bin/sync.sh --all'), '~/.local/state/cronboard/logs/sync.log');
+    assert.equal(defaultLog('', ''), '~/.local/state/cronboard/logs/job.log');
 });
