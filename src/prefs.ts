@@ -11,7 +11,7 @@ import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/ex
 
 import {ConflictError, errorMessage, read, readStatuses, runNow, runnerPath, stateDir, write,
     type RunStatus} from './lib/crontab.ts';
-import {addJob, checkCommand, deleteJob, jobs, logFile, parse, serialize, setEnabled, updateJob,
+import {addJob, checkCommand, defaultLog, deleteJob, jobs, logFile, parse, serialize, setEnabled, splitLog, updateJob, withLog,
     type Job, type JobFields, type Line, type Track} from './lib/parser.ts';
 import {logDialog} from './logview.ts';
 import {describe, exprToPreset, formatWhen, nextRuns, presetToExpr, validate, type Preset} from './lib/schedule.ts';
@@ -269,7 +269,9 @@ class JobsPage {
         dialog.set_child(overlay);
 
         const name = new Adw.EntryRow({title: 'Name (optional)', text: job?.name ?? ''});
-        const command = new Adw.EntryRow({title: 'Command', text: job?.line.command ?? ''});
+        const split = splitLog(job?.line.command ?? '');
+        const command = new Adw.EntryRow({title: 'Command', text: split.command});
+        const log = new Adw.EntryRow({title: 'Log file (optional)', text: split.log ?? ''});
         const track = new Adw.SwitchRow({
             title: 'Track runs',
             subtitle: 'Show the last result in the panel menu',
@@ -278,6 +280,7 @@ class JobsPage {
         const jobGroup = new Adw.PreferencesGroup();
         jobGroup.add(name);
         jobGroup.add(command);
+        jobGroup.add(log);
         jobGroup.add(track);
 
         const preset = new Adw.ComboRow({title: 'Repeat', model: Gtk.StringList.new(PRESETS.map(p => p.label))});
@@ -361,6 +364,19 @@ class JobsPage {
         command.connect('changed', validity);
         fromExpr();
 
+        // New jobs get a suggested log file that follows the name until the field is edited.
+        let logFollows = !job;
+        const suggestLog = () => {
+            if (!logFollows)
+                return;
+            log.text = defaultLog(name.text, command.text);
+            logFollows = true; // setting the text above fires 'changed'
+        };
+        log.connect('changed', () => (logFollows = false));
+        name.connect('changed', suggestLog);
+        command.connect('changed', suggestLog);
+        suggestLog();
+
         const onSave = async () => {
             let tracking: Track | undefined;
             try {
@@ -372,10 +388,16 @@ class JobsPage {
             }
             const fields: JobFields = {
                 schedule: expr.text.trim().split(/\s+/).join(' '),
-                command: command.text.trim(),
+                command: withLog(command.text.trim(), log.text),
                 name: name.text.replace(/\s+/g, ' ').trim() || null,
                 track: tracking,
             };
+            // Cron can't write the log if its folder is missing; relative paths are from $HOME, like cron's.
+            const logPath = log.text.trim().replace(/^~(?=\/)/, GLib.get_home_dir());
+            if (logPath) {
+                const abs = GLib.path_is_absolute(logPath) ? logPath : GLib.build_filenamev([GLib.get_home_dir(), logPath]);
+                GLib.mkdir_with_parents(GLib.path_get_dirname(abs), 0o700);
+            }
             const error = await this.apply(lines => {
                 // After a failed save the crontab is reloaded; make sure this is still the same line.
                 if (job && lines[job.index]?.raw !== job.line.raw)
