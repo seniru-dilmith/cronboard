@@ -64,11 +64,14 @@ export function runnerPath(): string {
     return GLib.build_filenamev([GLib.get_user_data_dir(), 'cronboard', 'cronboard-run']);
 }
 
-async function run(argv: string[], input: string | null, cancellable: Gio.Cancellable | null): Promise<Result> {
+async function run(argv: string[], input: string | null, cancellable: Gio.Cancellable | null,
+    env: Record<string, string> = {}): Promise<Result> {
     const flags = Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE |
         (input === null ? Gio.SubprocessFlags.NONE : Gio.SubprocessFlags.STDIN_PIPE);
     const launcher = new Gio.SubprocessLauncher({flags});
     launcher.setenv('LC_ALL', 'C', true); // stable error messages to match on
+    for (const [key, value] of Object.entries(env))
+        launcher.setenv(key, value, true);
     const proc = launcher.spawnv(argv);
     const [, stdout, stderr] = await promise(cb => proc.communicate_utf8_async(input, cancellable, cb),
         r => proc.communicate_utf8_finish(r));
@@ -146,7 +149,8 @@ async function prune(dir: Gio.File): Promise<void> {
  * Runs a job now the way cron would: a minimal environment plus the crontab's
  * own variables, through $SHELL -c, in a transient systemd user unit so it
  * isn't a child of gnome-shell. Its output goes to the user journal.
- * Resolves when the job ends; `status` is the job's exit status.
+ * Resolves when the job ends; `status` is the job's exit status, and a
+ * non-empty `stderr` means systemd-run itself failed (the job's output goes to the journal).
  */
 export function runNow(job: Job, cancellable: Gio.Cancellable | null): Promise<Result> {
     const env: Record<string, string> = {
@@ -161,9 +165,15 @@ export function runNow(job: Job, cancellable: Gio.Cancellable | null): Promise<R
     const command = stdin === null
         ? [env.SHELL, '-c', cmd]
         : [env.SHELL, '-c', 'printf "%s" "$1" | "$0" -c "$2"', env.SHELL, stdin.endsWith('\n') ? stdin : `${stdin}\n`, cmd];
+    // systemd-run reaches the user's systemd over the user bus. Name it explicitly: shells started
+    // with dbus-run-session (nested or test sessions) have a private session bus without systemd on it.
+    const userBus = GLib.build_filenamev([GLib.get_user_runtime_dir(), 'bus']);
+    const busEnv: Record<string, string> = GLib.file_test(userBus, GLib.FileTest.EXISTS)
+        ? {DBUS_SESSION_BUS_ADDRESS: `unix:path=${userBus}`} : {};
     return run(['systemd-run', '--user', '--wait', '--collect', '--quiet',
         `--unit=cronboard-run-${GLib.get_real_time()}`, `--working-directory=${env.HOME}`,
-        '--', '/usr/bin/env', '-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...command], null, cancellable);
+        '--', '/usr/bin/env', '-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...command],
+    null, cancellable, busEnv);
 }
 
 /** False when a known cron service exists but isn't running. */
