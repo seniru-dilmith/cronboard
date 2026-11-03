@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parse, serialize, jobs, setEnabled, updateJob, addJob, deleteJob, splitPercent, DISABLED_MARKER}
+import {parse, serialize, jobs, setEnabled, updateJob, addJob, deleteJob, splitPercent, logFile, DISABLED_MARKER}
     from '../src/lib/parser.ts';
 
 const RUNNER = '/home/me/.local/share/cronboard/cronboard-run';
@@ -155,4 +155,21 @@ test('splitPercent follows cron rules', () => {
     assert.deepEqual(splitPercent('date +\\%F'), {cmd: 'date +%F', stdin: null});
     assert.deepEqual(splitPercent('mail -s hi me%line1%line2'), {cmd: 'mail -s hi me', stdin: 'line1\nline2'});
     assert.deepEqual(splitPercent('a\\%b%c\\%d'), {cmd: 'a%b', stdin: 'c%d'});
+});
+
+test('logFile finds where a command writes its output', () => {
+    const home = '/home/me';
+    const cases: [string, string | null][] = [
+        ['/x/sync.sh >> /x/sync.log 2>&1', '/x/sync.log'],
+        ['backup.sh > ~/logs/backup.log', '/home/me/logs/backup.log'],
+        ['backup.sh >>"$HOME/my logs/b.log"', '/home/me/my logs/b.log'],
+        ['run.sh >> out.log', '/home/me/out.log'],
+        ['run.sh > /dev/null 2>&1', null],
+        ['run.sh 2>&1', null],
+        ['run.sh 2> err.log', null],
+        ['run.sh >> $LOGDIR/x.log', null],
+        ['echo hi', null],
+    ];
+    for (const [command, expected] of cases)
+        assert.equal(logFile(command, home), expected, command);
 });

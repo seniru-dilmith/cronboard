@@ -121,6 +121,24 @@ export function checkCommand(command: string): string | null {
     return null;
 }
 
+/**
+ * The file a command sends its output to (`cmd >> file` or `cmd > file`), as an absolute path,
+ * or null if it has none. Cron runs jobs from $HOME, so relative paths and `~` resolve there.
+ * ponytail: paths with other variables in them (`$LOGDIR/x.log`) are skipped rather than guessed.
+ */
+export function logFile(command: string, home: string): string | null {
+    const redirect = /(?:^|[^\d&<>])>>?\s*(?:"([^"]+)"|'([^']+)'|([^\s;&|<>]+))/g;
+    for (const m of command.matchAll(redirect)) {
+        let path = (m[1] ?? m[2] ?? m[3]).replace(/^(~|\$HOME|\$\{HOME\})(?=\/)/, home);
+        if (path === '/dev/null' || path.includes('$'))
+            continue;
+        if (!path.startsWith('/'))
+            path = `${home}/${path}`;
+        return path;
+    }
+    return null;
+}
+
 function spliced(lines: Line[], start: number, remove: number, ...add: string[]): Line[] {
     const copy = lines.slice();
     copy.splice(start, remove, ...add.map(parseLine));
