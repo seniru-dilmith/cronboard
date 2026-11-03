@@ -2,6 +2,10 @@
     color: #e01b24;
 }
 
+.cronboard-details {
+    font-size: 0.85em;
+}
+
 .cronboard-warning {
     color: #e5a50a;
 }

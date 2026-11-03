@@ -17,7 +17,11 @@ import {NotInstalledError, cronServiceActive, errorMessage, isCancelled, read, r
 import {jobs, parse, serialize, setEnabled, type Job} from './lib/parser.ts';
 import {describe, formatWhen, nextRuns} from './lib/schedule.ts';
 
-const esc = (s: string) => GLib.markup_escape_text(s, -1);
+interface Row {
+    job: Job;
+    title: string;
+    details: string;
+}
 
 // "/home/me/bin/backup.sh --photos" -> "backup.sh --photos", capped in length.
 function shorten(command: string): string {
@@ -41,8 +45,8 @@ class Indicator {
     private monitor: Gio.FileMonitor | null = null;
     private monitorId = 0;
     private snapshot: string | null = null; // the crontab text the menu was built from
-    private tracked: string[] = [];
     private generation = 0;
+    private renderedKey: string | null = null;
 
     constructor(ext: Extension) {
         this.button.add_child(this.icon);
@@ -85,26 +89,30 @@ class Indicator {
             warning = e instanceof NotInstalledError ? e.message : `Could not read the crontab: ${errorMessage(e)}`;
         }
         const list = text === null ? [] : jobs(parse(text));
-        const tracked = list.flatMap(j => j.line.track ? [j.line.track.id] : []);
-        const statuses = await readStatuses(tracked, this.cancellable);
+        const statuses = await readStatuses(list.flatMap(j => j.line.track ? [j.line.track.id] : []), this.cancellable);
         // A newer refresh may have started meanwhile; only the latest one renders.
         if (generation !== this.generation || this.cancellable.is_cancelled())
             return;
         this.snapshot = text;
-        this.tracked = tracked;
         this.render(list, statuses, warning);
     }
 
     private render(list: Job[], statuses: Map<string, RunStatus>, warning: string | null): void {
-        this.section.removeAll();
         this.showFailed(statuses);
+        const now = new Date();
+        const rows = list.map(job => this.row(job, job.line.track ? statuses.get(job.line.track.id) : undefined, now));
+        // Rebuilding destroys the item under the pointer and drops the click, so only rebuild on real changes.
+        const key = JSON.stringify([warning, rows.map(r => [r.job.index, r.job.line.raw, r.title, r.details])]);
+        if (key === this.renderedKey)
+            return;
+        this.renderedKey = key;
+        this.section.removeAll();
         if (warning)
             this.section.addMenuItem(infoItem(warning, 'cronboard-warning'));
-        else if (list.length === 0)
+        else if (rows.length === 0)
             this.section.addMenuItem(infoItem('No cron jobs yet'));
-        const now = new Date();
-        for (const job of list)
-            this.section.addMenuItem(this.jobItem(job, job.line.track ? statuses.get(job.line.track.id) : undefined, now));
+        for (const row of rows)
+            this.section.addMenuItem(this.jobItem(row));
     }
 
     private showFailed(statuses: Map<string, RunStatus>): void {
@@ -114,20 +122,27 @@ class Indicator {
             this.icon.remove_style_class_name('cronboard-failed');
     }
 
-    private jobItem(job: Job, status: RunStatus | undefined, now: Date): PopupMenu.PopupMenuItem {
+    private row(job: Job, status: RunStatus | undefined, now: Date): Row {
         const {line} = job;
-        const title = job.name ?? shorten(line.command);
         const next = line.enabled ? nextRuns(line.schedule, now, 1)[0] : undefined;
         const details = [describe(line.schedule) +
             (next ? ` · next ${formatWhen(next, now)}` : '') + (line.enabled ? '' : ' · disabled')];
         if (status)
             details.push(`last run ${formatWhen(status.finished, now)}: ${status.exit === 0 ? 'OK' : `failed (exit ${status.exit})`}`);
+        return {job, title: job.name ?? shorten(line.command), details: details.join('\n')};
+    }
 
-        const item = new PopupMenu.PopupMenuItem('');
-        item.label.clutter_text.set_markup(`${esc(title)}\n<small>${details.map(esc).join('\n')}</small>`);
-        item.label.x_expand = true;
+    private jobItem({job, title, details}: Row): PopupMenu.PopupMenuItem {
+        const {line} = job;
+        const item = new PopupMenu.PopupMenuItem(title);
+        // Title above a smaller details line; the title stays item.label, which screen readers announce.
+        const text = new St.BoxLayout({vertical: true, x_expand: true});
+        item.remove_child(item.label);
+        text.add_child(item.label);
+        text.add_child(new St.Label({text: details, style_class: 'cronboard-details'}));
+        item.insert_child_at_index(text, 1); // after the ornament
         if (!line.enabled)
-            item.label.opacity = 160;
+            text.opacity = 140;
         // Announced like PopupSwitchMenuItem: a checkable item that is on when the job is enabled.
         item.accessible_role = Atk.Role.CHECK_MENU_ITEM;
         if (line.enabled)
@@ -149,7 +164,6 @@ class Indicator {
         return item;
     }
 
-    // The menu closes on activate, and the next open re-reads the crontab, so no local state to update.
     private async toggle(job: Job): Promise<void> {
         const snapshot = this.snapshot;
         if (snapshot === null)
@@ -159,42 +173,42 @@ class Indicator {
         } catch (e) {
             Main.notifyError('Cronboard: could not update the crontab', errorMessage(e));
         }
+        // The menu has closed; rebuild the rows now so the next open has nothing to rebuild.
+        void this.refresh();
     }
 
     private async run(job: Job, title: string): Promise<void> {
         Main.notify('Cronboard', `Running ${title}…`);
         try {
             const r = await runNow(job, this.cancellable);
-            if (r.status === 0)
+            if (r.stderr.trim())
+                Main.notifyError(`Cronboard: could not run ${title}`, r.stderr.trim());
+            else if (r.status === 0)
                 Main.notify('Cronboard', `${title} finished`);
             else
                 Main.notifyError(`Cronboard: ${title} failed (exit ${r.status})`,
-                    r.stderr.trim() || 'Its output is in the journal: journalctl --user -u "cronboard-run-*"');
+                    'Its output is in the journal: journalctl --user -u "cronboard-run-*"');
         } catch (e) {
             if (!isCancelled(e))
                 Main.notifyError(`Cronboard: could not run ${title}`, errorMessage(e));
         }
     }
 
-    // Tracked jobs write <id>.status when they finish; turn the icon red if one failed.
+    // Tracked jobs write <id>.status when they finish. Re-read everything then, since
+    // the job may have been tracked from prefs after the last refresh.
     private watchStatuses(): void {
         try {
-            // GLib's monitor also copes with a folder that doesn't exist yet.
+            // A monitor started on a missing folder never reports the files created in it later.
+            GLib.mkdir_with_parents(stateDir(), 0o700);
             this.monitor = Gio.File.new_for_path(stateDir()).monitor_directory(Gio.FileMonitorFlags.NONE, this.cancellable);
             this.monitorId = this.monitor.connect('changed', (_monitor, file) => {
                 const name = file.get_basename() ?? '';
                 if (name.endsWith('.status') && !name.startsWith('.'))
-                    void this.updateFailed();
+                    void this.refresh();
             });
         } catch (e) {
             console.warn(`Cronboard: not watching run statuses: ${errorMessage(e)}`);
         }
-    }
-
-    private async updateFailed(): Promise<void> {
-        const statuses = await readStatuses(this.tracked, this.cancellable);
-        if (!this.cancellable.is_cancelled())
-            this.showFailed(statuses);
     }
 }
 
