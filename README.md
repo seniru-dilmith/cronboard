@@ -12,7 +12,8 @@ Manage your cron jobs from the GNOME top bar.
 
 <br>
 
-<img src="screenshots/panel-menu.png" width="482" alt="The Cronboard menu in the GNOME top bar">
+<img src="screenshots/panel-menu.png" width="420" alt="The Cronboard menu in the GNOME top bar">
+<img src="screenshots/preferences.png" width="420" alt="The Cronboard preferences window">
 
 </div>
 
