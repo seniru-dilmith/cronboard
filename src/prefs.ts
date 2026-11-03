@@ -9,9 +9,9 @@ import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import {ConflictError, errorMessage, read, readStatuses, runnerPath, stateDir, write,
+import {ConflictError, errorMessage, read, readStatuses, runNow, runnerPath, stateDir, write,
     type RunStatus} from './lib/crontab.ts';
-import {addJob, checkCommand, deleteJob, jobs, parse, serialize, setEnabled, updateJob,
+import {addJob, checkCommand, deleteJob, jobs, logFile, parse, serialize, setEnabled, updateJob,
     type Job, type JobFields, type Line, type Track} from './lib/parser.ts';
 import {describe, exprToPreset, formatWhen, nextRuns, presetToExpr, validate, type Preset} from './lib/schedule.ts';
 
@@ -63,6 +63,7 @@ class JobsPage {
     private readonly page = new Adw.PreferencesPage({title: 'Jobs', icon_name: 'alarm-symbolic'});
     private group: Adw.PreferencesGroup | null = null;
     private snapshot: string | null = null; // the crontab text the rows were built from
+    private readonly running = new Set<string>(); // raw lines of jobs started with Run now
 
     constructor(window: Adw.PreferencesWindow, runnerSource: Gio.File) {
         this.window = window;
@@ -91,15 +92,14 @@ class JobsPage {
             this.page.remove(this.group);
         this.group = new Adw.PreferencesGroup({
             title: 'Cron jobs',
-            description: GLib.markup_escape_text(error ??
-                "Your crontab. Comments, variables and lines Cronboard doesn't understand are kept as they are.", -1),
+            description: error ? GLib.markup_escape_text(error, -1) : undefined,
         });
         const add = flatButton('list-add-symbolic', 'Add job');
         add.sensitive = this.snapshot !== null;
         add.connect('clicked', () => this.edit(null));
         this.group.set_header_suffix(add);
         if (list.length === 0 && error === null)
-            this.group.add(new Adw.ActionRow({title: 'No cron jobs yet', subtitle: 'Add one with the + button.'}));
+            this.group.add(new Adw.ActionRow({title: 'No cron jobs yet', subtitle: 'Use + to add one.'}));
         const now = new Date();
         for (const job of list)
             this.group.add(this.row(job, job.line.track ? statuses.get(job.line.track.id) : undefined, now));
@@ -117,11 +117,18 @@ class JobsPage {
             details.push(`Last run ${formatWhen(status.finished, now)}: ${status.exit === 0 ? 'OK' : `failed (exit ${status.exit})`}`);
         const row = new Adw.ActionRow({title: job.name ?? line.command, subtitle: details.join('\n'), use_markup: false});
 
-        if (line.track) {
-            const id = line.track.id;
-            const output = flatButton('text-x-generic-symbolic', 'Open last output');
-            output.connect('clicked', () => this.openOutput(id));
-            row.add_suffix(output);
+        const run = flatButton('media-playback-start-symbolic', 'Run now');
+        if (this.running.has(line.raw)) {
+            run.set_child(new Gtk.Spinner({spinning: true}));
+            run.sensitive = false;
+            run.tooltip_text = 'Running…';
+        }
+        run.connect('clicked', () => this.confirmRun(job));
+        row.add_suffix(run);
+        if (this.logPaths(job).length > 0) {
+            const log = flatButton('text-x-generic-symbolic', 'Open log');
+            log.connect('clicked', () => this.openLog(job));
+            row.add_suffix(log);
         }
         const edit = flatButton('document-edit-symbolic', 'Edit');
         edit.connect('clicked', () => this.edit(job));
@@ -139,7 +146,7 @@ class JobsPage {
     private async apply(change: (lines: Line[]) => Line[]): Promise<string | null> {
         const snapshot = this.snapshot;
         if (snapshot === null)
-            return 'The crontab could not be read, so it cannot be changed.';
+            return "Can't save: the crontab couldn't be read.";
         this.page.sensitive = false; // one write at a time
         try {
             await write(serialize(change(parse(snapshot))), snapshot);
@@ -158,15 +165,62 @@ class JobsPage {
             this.window.add_toast(toast(error));
     }
 
-    private openOutput(id: string): void {
-        const log = Gio.File.new_for_path(GLib.build_filenamev([stateDir(), `${id}.log`]));
-        try {
-            if (!log.query_exists(null))
-                throw new Error("this job hasn't run since tracking was turned on");
-            Gio.AppInfo.launch_default_for_uri(log.get_uri(), null);
-        } catch (e) {
-            this.window.add_toast(toast(`Could not open the output: ${errorMessage(e)}`));
+    // The file the job's command writes its output to, then the output Track runs keeps.
+    private logPaths(job: Job): string[] {
+        const own = logFile(job.line.command, GLib.get_home_dir());
+        const tracked = job.line.track ? GLib.build_filenamev([stateDir(), `${job.line.track.id}.log`]) : null;
+        return [own, tracked].filter((p): p is string => p !== null);
+    }
+
+    private openLog(job: Job): void {
+        const paths = this.logPaths(job);
+        const path = paths.find(p => GLib.file_test(p, GLib.FileTest.EXISTS));
+        if (!path) {
+            this.window.add_toast(toast(`No log yet: ${paths[0]} doesn't exist`));
+            return;
         }
+        try {
+            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(), null);
+        } catch (e) {
+            this.window.add_toast(toast(`Couldn't open ${path}: ${errorMessage(e)}`));
+        }
+    }
+
+    private confirmRun(job: Job): void {
+        const dialog = new Adw.AlertDialog({heading: 'Run this job now?', body: job.name ?? job.line.command});
+        dialog.add_response('cancel', 'Cancel');
+        dialog.add_response('run', 'Run');
+        dialog.set_response_appearance('run', Adw.ResponseAppearance.SUGGESTED);
+        dialog.set_default_response('cancel');
+        dialog.set_close_response('cancel');
+        dialog.connect('response', (_dialog, response) => {
+            if (response === 'run')
+                void this.run(job);
+        });
+        dialog.present(this.window);
+    }
+
+    // Runs it the way cron would (see runNow). The row shows a spinner until it ends, which can take minutes.
+    private async run(job: Job): Promise<void> {
+        const title = job.name ?? job.line.command;
+        this.running.add(job.line.raw);
+        void this.reload();
+        let message: string;
+        try {
+            const r = await runNow(job, null);
+            message = r.stderr.trim() ? `Couldn't start ${title}: ${r.stderr.trim()}`
+                : r.status === 0 ? `${title} finished` : `${title} failed (exit ${r.status})`;
+        } catch (e) {
+            message = `Couldn't start ${title}: ${errorMessage(e)}`;
+        }
+        this.running.delete(job.line.raw);
+        void this.reload();
+        const done = new Adw.Toast({title: message, use_markup: false, timeout: 10});
+        if (this.logPaths(job).length > 0) {
+            done.button_label = 'Open log';
+            done.connect('button-clicked', () => this.openLog(job));
+        }
+        this.window.add_toast(done);
     }
 
     private confirmDelete(job: Job): void {
@@ -208,7 +262,7 @@ class JobsPage {
         const command = new Adw.EntryRow({title: 'Command', text: job?.line.command ?? ''});
         const track = new Adw.SwitchRow({
             title: 'Track runs',
-            subtitle: 'Record the last exit status and output, shown in the panel menu',
+            subtitle: 'Show the last result in the panel menu',
             active: Boolean(job?.line.track),
         });
         const jobGroup = new Adw.PreferencesGroup();

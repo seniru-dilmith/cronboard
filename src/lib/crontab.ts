@@ -25,7 +25,7 @@ function promise<T>(start: (callback: (source: unknown, result: Gio.AsyncResult)
 
 export class ConflictError extends Error {
     constructor() {
-        super('The crontab was changed outside Cronboard, so nothing was saved. It has been reloaded; please try again.');
+        super('The crontab changed outside Cronboard, so nothing was saved. Check the list and try again.');
     }
 }
 
