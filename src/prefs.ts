@@ -13,6 +13,7 @@ import {ConflictError, errorMessage, read, readStatuses, runNow, runnerPath, sta
     type RunStatus} from './lib/crontab.ts';
 import {addJob, checkCommand, deleteJob, jobs, logFile, parse, serialize, setEnabled, updateJob,
     type Job, type JobFields, type Line, type Track} from './lib/parser.ts';
+import {logDialog} from './logview.ts';
 import {describe, exprToPreset, formatWhen, nextRuns, presetToExpr, validate, type Preset} from './lib/schedule.ts';
 
 const PRESETS: {id: Preset; label: string}[] = [
@@ -70,6 +71,14 @@ class JobsPage {
         this.runnerSource = runnerSource;
         window.set_default_size(680, 720); // room for the editor's preview without scrolling
         window.add(this.page);
+        // Tracked jobs run the installed copy of the wrapper; keep it in step with this version.
+        if (GLib.file_test(runnerPath(), GLib.FileTest.EXISTS)) {
+            try {
+                installRunner(runnerSource);
+            } catch (e) {
+                console.warn(`Cronboard: could not update cronboard-run: ${errorMessage(e)}`);
+            }
+        }
         void this.reload();
     }
 
@@ -181,7 +190,7 @@ class JobsPage {
             return;
         }
         try {
-            Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(), null);
+            logDialog(job.name ?? job.line.command, path).present(this.window);
         } catch (e) {
             this.window.add_toast(toast(`Couldn't open ${path}: ${errorMessage(e)}`));
         }
