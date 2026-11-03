@@ -1,31 +1,54 @@
+<img src="icons/cronboard.svg" width="96" alt="">
+
 # Cronboard
 
-A GNOME Shell extension (GNOME 46) for managing your own crontab from the top panel.
+A GNOME Shell extension for managing your crontab from the top bar. It works on GNOME 46.
 
-- **Panel menu:** every job with its schedule in words, its next run and, for tracked jobs, the last result. A switch turns a job on or off, and ▶ runs it now. The icon turns red when a tracked job's last run failed.
-- **Preferences:** add, edit and delete jobs. Pick a preset (every minute, hour, day, week, month, at startup) or type a cron expression. It's checked as you type, with a plain-English description and the next five run times.
+The panel menu lists your cron jobs with their schedule written out ("every weekday at 09:00") and when each one runs next. Each job has a switch to turn it off and on again. In the preferences you can add, edit and delete jobs, run a job immediately, and open its log, which keeps updating while the job is running.
 
-## How it treats your crontab
+## Features
 
-- It reads with `crontab -l` and writes with `crontab -`. Only the lines you edit change: comments, blank lines, variables and anything Cronboard doesn't understand stay exactly as they were.
-- Disabled jobs are commented out with a marker: `#cronboard-disabled# 0 9 * * 1-5 /path/to/script.sh`.
-- A job's name is the comment on the line directly above it.
-- Before every write, Cronboard re-reads the crontab and refuses to save if it changed since it was loaded (for example by `crontab -e`). It also backs up the old version to `~/.local/share/cronboard/backups/`, keeping the last 20 with permissions 0600.
-- **Run now** uses a cron-like environment: a minimal environment plus the crontab's own variables, through `$SHELL -c`, in a temporary systemd user unit. Its output goes to the journal: `journalctl --user -u 'cronboard-run-*'`.
-- **Track runs** (optional, per job) wraps the command as `~/.local/share/cronboard/cronboard-run <id> '<command>'`. It records the exit status and the last 64 KB of output in `~/.local/state/cronboard/`. Cron still mails the output as before, with stdout and stderr combined. The wrapper lives outside the extension folder, so tracked jobs keep working if you uninstall Cronboard. Turn tracking off before deleting `~/.local/share/cronboard`.
+- Schedules shown in plain words, with the next run time
+- Turn jobs off and on without deleting them
+- An editor with presets (hourly, daily, weekly, monthly, at startup) or your own cron expression, checked as you type, showing the next five runs
+- Run a job now, after a confirmation, in the same minimal environment cron uses
+- A live log view for jobs that write to a log file, such as `script.sh >> ~/logs/sync.log 2>&1`
+- Optional run tracking: the panel icon turns red when a tracked job's last run failed
 
-Only the current user's crontab is supported. Root's crontab and `/etc/cron.d` are out of scope.
+## How it handles your crontab
+
+Cronboard reads your crontab with `crontab -l` and saves it with `crontab -`. Lines it doesn't edit are left exactly as they were, including comments, blank lines and variables such as `MAILTO=`.
+
+Before saving, it checks the crontab hasn't been changed by something else since it was loaded, for example `crontab -e`. If it has, it doesn't save. The previous version is backed up to `~/.local/share/cronboard/backups/`, and the last 20 backups are kept.
+
+A disabled job is commented out with a marker, so enabling it again restores the original line:
+
+```
+#cronboard-disabled# 0 9 * * 1-5 /path/to/script.sh
+```
+
+A comment on the line directly above a job is used as its name.
+
+Run tracking is off by default and can be turned on per job. It runs the command through a small script that saves the exit code and recent output to `~/.local/state/cronboard/`. Cron still mails the output as usual. The script is stored in `~/.local/share/cronboard/`, outside the extension, so tracked jobs keep working if Cronboard is removed. Turn tracking off before deleting that folder.
+
+Only your own crontab is supported, not the root crontab or `/etc/cron.d`.
+
+## Installing from source
+
+```sh
+git clone https://github.com/seniru-dilmith/cronboard.git
+cd cronboard
+npm install
+npm run build
+npm run install-dev
+gnome-extensions enable cronboard@seniru-dilmith.github.io
+```
+
+On Wayland, log out and back in once so GNOME Shell loads it.
 
 ## Development
 
-```sh
-npm install
-npm test             # parser and schedule tests (Node)
-npm run build        # type-check, then bundle into dist/
-npm run install-dev  # symlink dist/ into ~/.local/share/gnome-shell/extensions
-npm run nested       # nested GNOME Shell with the extension enabled
-npm run pack         # zip for extensions.gnome.org
-```
+`npm test` runs the parser and schedule tests. `npm run nested` starts a nested GNOME Shell with the extension enabled, and `npm run pack` builds the zip for extensions.gnome.org.
 
 ## License
 
