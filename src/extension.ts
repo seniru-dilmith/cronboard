@@ -12,7 +12,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-import {NotInstalledError, cronServiceActive, errorMessage, isCancelled, read, readStatuses, runNow, stateDir, write,
+import {NotInstalledError, cronServiceActive, errorMessage, isCancelled, read, readStatuses, stateDir, write,
     type RunStatus} from './lib/crontab.ts';
 import {jobs, parse, serialize, setEnabled, type Job} from './lib/parser.ts';
 import {describe, formatWhen, nextRuns} from './lib/schedule.ts';
@@ -39,7 +39,7 @@ function infoItem(text: string, styleClass?: string): PopupMenu.PopupMenuItem {
 class Indicator {
     private readonly button = new PanelMenu.Button(0.0, 'Cronboard', false);
     private readonly menu = this.button.menu as PopupMenu.PopupMenu;
-    private readonly icon = new St.Icon({icon_name: 'alarm-symbolic', style_class: 'system-status-icon'});
+    private readonly icon: St.Icon;
     private readonly section = new PopupMenu.PopupMenuSection();
     private readonly cancellable = new Gio.Cancellable();
     private monitor: Gio.FileMonitor | null = null;
@@ -49,6 +49,10 @@ class Indicator {
     private renderedKey: string | null = null;
 
     constructor(ext: Extension) {
+        // A "-symbolic" SVG is recoloured to match the panel, like the stock icons.
+        const gicon = Gio.icon_new_for_string(`${ext.path}/icons/cronboard-symbolic.svg`);
+        // The cast only bridges two copies of the Gio typings in @girs; at runtime it's the same Gio.Icon.
+        this.icon = new St.Icon({gicon: gicon as unknown as St.Icon['gicon'], style_class: 'system-status-icon'});
         this.button.add_child(this.icon);
         this.menu.addMenuItem(this.section);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
@@ -148,17 +152,7 @@ class Indicator {
         if (line.enabled)
             item.add_accessible_state(Atk.StateType.CHECKED);
 
-        const run = new St.Button({
-            child: new St.Icon({icon_name: 'media-playback-start-symbolic', icon_size: 16}),
-            style_class: 'cronboard-run-button',
-            can_focus: true,
-            accessible_name: `Run ${title} now`,
-        });
-        run.connect('clicked', () => {
-            this.menu.close(true);
-            void this.run(job, title);
-        });
-        item.add_child(run);
+        // Run now lives in the preferences, behind a confirmation, so a stray click here can't start a job.
         item.add_child(new PopupMenu.Switch(line.enabled));
         item.connect('activate', () => void this.toggle(job));
         return item;
@@ -175,23 +169,6 @@ class Indicator {
         }
         // The menu has closed; rebuild the rows now so the next open has nothing to rebuild.
         void this.refresh();
-    }
-
-    private async run(job: Job, title: string): Promise<void> {
-        Main.notify('Cronboard', `Running ${title}…`);
-        try {
-            const r = await runNow(job, this.cancellable);
-            if (r.stderr.trim())
-                Main.notifyError(`Cronboard: could not run ${title}`, r.stderr.trim());
-            else if (r.status === 0)
-                Main.notify('Cronboard', `${title} finished`);
-            else
-                Main.notifyError(`Cronboard: ${title} failed (exit ${r.status})`,
-                    'Its output is in the journal: journalctl --user -u "cronboard-run-*"');
-        } catch (e) {
-            if (!isCancelled(e))
-                Main.notifyError(`Cronboard: could not run ${title}`, errorMessage(e));
-        }
     }
 
     // Tracked jobs write <id>.status when they finish. Re-read everything then, since

@@ -7,11 +7,11 @@
   "license": "GPL-2.0-or-later",
   "scripts": {
     "check": "tsc",
-    "build": "npm run check && esbuild src/extension.ts src/prefs.ts --bundle --format=esm --target=firefox115 '--external:gi://*' '--external:resource://*' --outdir=dist && cp metadata.json stylesheet.css data/cronboard-run dist/",
+    "build": "npm run check && esbuild src/extension.ts src/prefs.ts --bundle --format=esm --target=firefox115 '--external:gi://*' '--external:resource://*' --outdir=dist && cp metadata.json stylesheet.css data/cronboard-run dist/ && cp -r icons dist/",
     "test": "TZ=UTC node --test tests/*.test.ts",
     "install-dev": "mkdir -p ~/.local/share/gnome-shell/extensions && ln -sfn \"$PWD/dist\" ~/.local/share/gnome-shell/extensions/cronboard@seniru-dilmith.github.io",
     "nested": "MUTTER_DEBUG_DUMMY_MODE_SPECS=1280x800 dbus-run-session -- sh -c 'gnome-shell --nested --wayland & sleep 3; gnome-extensions enable cronboard@seniru-dilmith.github.io; wait'",
-    "pack": "npm run build && gnome-extensions pack dist --extra-source=cronboard-run --force"
+    "pack": "npm run build && gnome-extensions pack dist --extra-source=cronboard-run --extra-source=icons --force"
   },
   "devDependencies": {
     "@girs/gnome-shell": "^46.0.2",
