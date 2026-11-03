@@ -67,6 +67,7 @@ class JobsPage {
     constructor(window: Adw.PreferencesWindow, runnerSource: Gio.File) {
         this.window = window;
         this.runnerSource = runnerSource;
+        window.set_default_size(680, 720); // room for the editor's preview without scrolling
         window.add(this.page);
         void this.reload();
     }
