@@ -10,6 +10,10 @@ Manage your cron jobs from the GNOME top bar.
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178c6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-GPL--2.0--or--later-2ea44f)
 
+<br>
+
+<img src="screenshots/panel-menu.png" width="482" alt="The Cronboard menu in the GNOME top bar">
+
 </div>
 
 ## Features
