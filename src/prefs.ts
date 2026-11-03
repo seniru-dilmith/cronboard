@@ -90,9 +90,10 @@ class JobsPage {
     private show(list: Job[], statuses: Map<string, RunStatus>, error: string | null): void {
         if (this.group)
             this.page.remove(this.group);
+        // GObject rejects `description: undefined`, so the key is only passed when there's an error to show.
         this.group = new Adw.PreferencesGroup({
             title: 'Cron jobs',
-            description: error ? GLib.markup_escape_text(error, -1) : undefined,
+            ...(error ? {description: GLib.markup_escape_text(error, -1)} : {}),
         });
         const add = flatButton('list-add-symbolic', 'Add job');
         add.sensitive = this.snapshot !== null;
