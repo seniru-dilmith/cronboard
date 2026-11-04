@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, e.g. 1.2.0 (tagged as v1.2.0)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - name: Package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          node -e '
+            const f = "dist/metadata.json";
+            const m = JSON.parse(require("fs").readFileSync(f));
+            m["version-name"] = process.env.VERSION;
+            require("fs").writeFileSync(f, JSON.stringify(m, null, 2) + "\n");
+          '
+          cd dist && zip -r "../cronboard@seniru-dilmith.github.io.shell-extension.zip" .
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "v$VERSION" ./*.shell-extension.zip \
+            --title "v$VERSION" --generate-notes --target "$GITHUB_SHA"
