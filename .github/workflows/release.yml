@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version to release, e.g. 1.2.0 (tagged as v1.2.0)
+        description: Version
         required: true
 
 permissions:
@@ -20,6 +20,15 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Bump package version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release $VERSION"
+          git push
       - run: npm test
       - run: npm run build
       - name: Package
@@ -39,4 +48,4 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           gh release create "v$VERSION" ./*.shell-extension.zip \
-            --title "v$VERSION" --generate-notes --target "$GITHUB_SHA"
+            --title "v$VERSION" --generate-notes --target "$(git rev-parse HEAD)"
