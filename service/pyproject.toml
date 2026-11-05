@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cronboard-service"
-version = "1.0.2"
+version = "1.0.4"
 description = "Session D-Bus service that lets the Cronboard GNOME Shell extension read and change your crontab"
 readme = "README.md"
 license = "GPL-2.0-or-later"
