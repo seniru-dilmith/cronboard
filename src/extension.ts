@@ -12,7 +12,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-import {NotInstalledError, cronServiceActive, errorMessage, isCancelled, read, readStatuses, stateDir, write,
+import {NotInstalledError, ServiceMissingError, cronServiceActive, errorMessage, isCancelled, read, readStatuses, stateDir, write,
     type RunStatus} from './lib/crontab.ts';
 import {jobs, parse, serialize, setEnabled, type Job} from './lib/parser.ts';
 import {describe, formatWhen, nextRuns} from './lib/schedule.ts';
@@ -92,7 +92,7 @@ class Indicator {
         } catch (e) {
             if (isCancelled(e))
                 return;
-            warning = e instanceof NotInstalledError ? e.message : `Could not read the crontab: ${errorMessage(e)}`;
+            warning = e instanceof NotInstalledError || e instanceof ServiceMissingError ? e.message : `Could not read the crontab: ${errorMessage(e)}`;
         }
         const list = text === null ? [] : jobs(parse(text));
         const statuses = await readStatuses(list.flatMap(j => j.line.track ? [j.line.track.id] : []), this.cancellable);
