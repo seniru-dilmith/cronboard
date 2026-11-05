@@ -27,6 +27,15 @@ Manage your cron jobs from the GNOME top bar.
 
 ## Install
 
+Cronboard has two parts. The extension shows the menu and preferences, and a small companion service does the work a GNOME Shell extension isn't allowed to do itself: reading and writing your crontab and starting jobs. They talk over the session D-Bus. Install the service first:
+
+```sh
+pipx install cronboard-service
+cronboard-service install
+```
+
+Then the extension:
+
 ```sh
 git clone https://github.com/seniru-dilmith/cronboard.git
 cd cronboard
@@ -39,6 +48,8 @@ gnome-extensions enable cronboard@seniru-dilmith.github.io
 Log out and back in once so GNOME Shell loads it.
 
 ## Good to know
+
+**Without the service** the menu says so and shows no jobs. Nothing else on your system is touched.
 
 **Your crontab stays as you wrote it.** Cronboard only rewrites the lines you edit. Comments, blank lines and variables are left alone. If the crontab changed elsewhere since Cronboard loaded it, Cronboard won't save over it. A backup of the previous version is kept in `~/.local/share/cronboard/backups/` before every save.
 
@@ -58,7 +69,7 @@ Only your own crontab is managed, not the root crontab or `/etc/cron.d`.
 
 ```sh
 npm test          # unit tests
-npm run build     # type-check and bundle into dist/
+npm run build     # type-check and compile into dist/
 npm run nested    # try it in a nested GNOME Shell
 npm run pack      # build the zip for extensions.gnome.org
 ```

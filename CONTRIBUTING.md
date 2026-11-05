@@ -12,7 +12,16 @@ journalctl -f -o cat /usr/bin/gnome-shell
 
 ## Setting up
 
-You need Node.js 22.6 or newer and GNOME Shell 46.
+You need Node.js 22.6 or newer, Python 3.10 or newer and GNOME Shell 46.
+
+The extension talks to the companion service in `service/`, so install that too:
+
+```bash
+pip install -e service
+cronboard-service install
+```
+
+Then the extension:
 
 ```bash
 npm install
@@ -27,9 +36,10 @@ npm run install-dev
 ```bash
 npm run build
 npm test
+python -m unittest service/tests/test_core.py
 ```
 
-Both run in CI on every pull request, so they need to pass.
+All three run in CI on every pull request, so they need to pass.
 
 - Keep a pull request focused on one change.
 - Add or update tests in `tests/` when you change logic.

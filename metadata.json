@@ -1,7 +1,7 @@
 {
   "uuid": "cronboard@seniru-dilmith.github.io",
   "name": "Cronboard",
-  "description": "View, create, edit, enable/disable and run your cron jobs from the top panel.",
+  "description": "View, create, edit, enable/disable and run your cron jobs from the top panel. Needs the cronboard-service companion (pipx install cronboard-service) to access your crontab.",
   "shell-version": ["46"],
   "url": "https://github.com/seniru-dilmith/cronboard"
 }
