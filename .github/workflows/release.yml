@@ -13,6 +13,8 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.bump.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,14 +23,17 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Bump package version
+        id: bump
         env:
           VERSION: ${{ inputs.version }}
         run: |
           npm version "$VERSION" --no-git-tag-version --allow-same-version
+          sed -i "s/^version = .*/version = \"$VERSION\"/" service/pyproject.toml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -am "Release $VERSION"
           git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - run: npm test
       - run: npm run build
       - name: Package
@@ -49,3 +54,21 @@ jobs:
         run: |
           gh release create "v$VERSION" ./*.shell-extension.zip \
             --title "v$VERSION" --generate-notes --target "$(git rev-parse HEAD)"
+
+  pypi:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build && python -m build service
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: service/dist

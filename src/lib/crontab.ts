@@ -1,14 +1,17 @@
-// Everything that touches the system: reading and writing the crontab (with
-// backups), running a job now, checking the cron service and reading tracked
-// run statuses. Async only: this also runs inside gnome-shell, where a
-// blocking call freezes the desktop.
+// Everything that touches the system: reading and writing the crontab, running a
+// job now, checking the cron service and reading tracked run statuses. The
+// crontab and job running go through the Cronboard service over the session
+// D-Bus (the extension never starts programs itself). Async only: this also
+// runs inside gnome-shell, where a blocking call freezes the desktop.
 
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
 import {lineCommand, splitPercent, type Job} from './parser.ts';
 
-const BACKUPS_KEPT = 20;
+const SERVICE = 'io.github.seniru_dilmith.Cronboard';
+const SERVICE_PATH = '/io/github/seniru_dilmith/Cronboard';
+const NO_TIMEOUT = 0x7fffffff; // a job run lasts as long as the job; the default would give up after 25 s
 
 // Wraps a GIO *_async/*_finish pair in a Promise. Used instead of
 // Gio._promisify because the @girs types only declare the callback form.
@@ -35,9 +38,14 @@ export class NotInstalledError extends Error {
     }
 }
 
+export class ServiceMissingError extends Error {
+    constructor() {
+        super('The Cronboard service is not running. Install it with "pipx install cronboard-service" and then run "cronboard-service install".');
+    }
+}
+
 export interface Result {
     status: number;
-    stdout: string;
     stderr: string;
 }
 
@@ -59,95 +67,55 @@ export function stateDir(): string {
     return GLib.build_filenamev([GLib.get_user_state_dir(), 'cronboard']);
 }
 
-async function run(argv: string[], input: string | null, cancellable: Gio.Cancellable | null,
-    env: Record<string, string> = {}): Promise<Result> {
-    const flags = Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE |
-        (input === null ? Gio.SubprocessFlags.NONE : Gio.SubprocessFlags.STDIN_PIPE);
-    const launcher = new Gio.SubprocessLauncher({flags});
-    launcher.setenv('LC_ALL', 'C', true); // stable error messages to match on
-    for (const [key, value] of Object.entries(env))
-        launcher.setenv(key, value, true);
-    const proc = launcher.spawnv(argv);
-    const [, stdout, stderr] = await promise(cb => proc.communicate_utf8_async(input, cancellable, cb),
-        r => proc.communicate_utf8_finish(r));
-    return {status: proc.get_exit_status(), stdout: stdout ?? '', stderr: stderr ?? ''};
+/** Calls a method of the Cronboard service; the bus starts the service if it is registered for activation. */
+async function call(method: string, args: unknown, replyType: string,
+    cancellable: Gio.Cancellable | null, timeout = -1): Promise<GLib.Variant> {
+    const bus = await promise(cb => Gio.bus_get(Gio.BusType.SESSION, cancellable, cb), r => Gio.bus_get_finish(r));
+    try {
+        return await promise(cb => bus.call(SERVICE, SERVICE_PATH, SERVICE, method, args as never, GLib.VariantType.new(replyType) as never,
+            Gio.DBusCallFlags.NONE, timeout, cancellable, cb), r => bus.call_finish(r));
+    } catch (e) {
+        if (!(e instanceof GLib.Error))
+            throw e;
+        if (e.matches(Gio.dbus_error_quark(), Gio.DBusError.SERVICE_UNKNOWN) ||
+            e.matches(Gio.dbus_error_quark(), Gio.DBusError.NAME_HAS_NO_OWNER))
+            throw new ServiceMissingError();
+        // Errors raised by the service arrive as remote errors named after what went wrong.
+        // The cast only bridges two copies of the GLib typings in @girs; at runtime it's the same GLib.Error.
+        const remote = e as unknown as Parameters<typeof Gio.DBusError.get_remote_error>[0];
+        const name = Gio.DBusError.get_remote_error(remote);
+        Gio.DBusError.strip_remote_error(remote);
+        if (name === `${SERVICE}.Error.Conflict`)
+            throw new ConflictError();
+        if (name === `${SERVICE}.Error.NotInstalled`)
+            throw new NotInstalledError();
+        throw e;
+    }
 }
 
 /** The current crontab text; '' when the user has none. */
 export async function read(cancellable: Gio.Cancellable | null = null): Promise<string> {
-    let r: Result;
-    try {
-        r = await run(['crontab', '-l'], null, cancellable);
-    } catch (e) {
-        if (e instanceof GLib.Error && e.matches(GLib.spawn_error_quark(), GLib.SpawnError.NOENT))
-            throw new NotInstalledError();
-        throw e;
-    }
-    if (r.status === 0)
-        return r.stdout;
-    if (r.stderr.startsWith('no crontab for '))
-        return '';
-    throw new Error(r.stderr.trim() || `crontab -l exited with status ${r.status}`);
+    const [text] = (await call('Read', null, '(s)', cancellable)).deepUnpack<[string]>();
+    return text;
 }
 
 /**
  * Installs `text` as the crontab, but only if the crontab still matches
- * `snapshot` (what the caller last read). The previous crontab is backed up first.
- * ponytail: the re-read and the install aren't atomic; flock(1) on a lock file would close that gap.
+ * `snapshot` (what the caller last read). The service backs up the previous one first.
  */
 export async function write(text: string, snapshot: string): Promise<void> {
-    const current = await read();
-    if (current !== snapshot)
-        throw new ConflictError();
-    if (text === current)
-        return;
-    if (current !== '')
-        await backup(current);
-    const input = text === '' || text.endsWith('\n') ? text : `${text}\n`; // cron needs a final newline
-    // No cancellable on purpose: cutting stdin short would install a truncated crontab.
-    const r = await run(['crontab', '-'], input, null);
-    if (r.status !== 0)
-        throw new Error(r.stderr.trim() || `crontab exited with status ${r.status}`);
-}
-
-async function backup(text: string): Promise<void> {
-    const dir = GLib.build_filenamev([GLib.get_user_data_dir(), 'cronboard', 'backups']);
-    if (GLib.mkdir_with_parents(dir, 0o700) !== 0)
-        throw new Error(`Could not create the backup folder ${dir}`);
-    const stamp = GLib.DateTime.new_now_local().format('%Y%m%d-%H%M%S-%f');
-    const file = Gio.File.new_for_path(GLib.build_filenamev([dir, `crontab-${stamp}.txt`]));
-    // GJS turns the Uint8Array into a GLib.Bytes that lives as long as the write.
-    await promise(cb => file.replace_contents_bytes_async(new TextEncoder().encode(text), null, false,
-        Gio.FileCreateFlags.PRIVATE, null, cb), r => file.replace_contents_finish(r));
-    await prune(Gio.File.new_for_path(dir));
-}
-
-async function prune(dir: Gio.File): Promise<void> {
-    const enumerator = await promise(cb => dir.enumerate_children_async('standard::name', Gio.FileQueryInfoFlags.NONE,
-        GLib.PRIORITY_DEFAULT, null, cb), r => dir.enumerate_children_finish(r));
-    const names: string[] = [];
-    for (;;) {
-        const infos = await promise(cb => enumerator.next_files_async(100, GLib.PRIORITY_DEFAULT, null, cb),
-            r => enumerator.next_files_finish(r));
-        if (infos.length === 0)
-            break;
-        names.push(...infos.map(info => info.get_name()));
-    }
-    const old = names.filter(n => /^crontab-.*\.txt$/.test(n)).sort().slice(0, -BACKUPS_KEPT);
-    await Promise.all(old.map(n => {
-        const file = dir.get_child(n);
-        return promise(cb => file.delete_async(GLib.PRIORITY_DEFAULT, null, cb), r => file.delete_finish(r));
-    }));
+    // No cancellable on purpose: cutting the call short could leave the caller unsure whether it was saved.
+    await call('Write', new GLib.Variant('(ss)', [text, snapshot]), '()', null);
 }
 
 /**
  * Runs a job now the way cron would: a minimal environment plus the crontab's
- * own variables, through $SHELL -c, in a transient systemd user unit so it
- * isn't a child of gnome-shell. Its output goes to the user journal.
+ * own variables, through $SHELL -c, in a transient systemd user unit (started by
+ * the service) so it isn't a child of gnome-shell. Its output goes to the user journal.
  * Resolves when the job ends; `status` is the job's exit status, and a
  * non-empty `stderr` means systemd-run itself failed (the job's output goes to the journal).
  */
-export function runNow(job: Job, cancellable: Gio.Cancellable | null): Promise<Result> {
+export async function runNow(job: Job, cancellable: Gio.Cancellable | null): Promise<Result> {
     const env: Record<string, string> = {
         HOME: GLib.get_home_dir(),
         LOGNAME: GLib.get_user_name(),
@@ -157,31 +125,18 @@ export function runNow(job: Job, cancellable: Gio.Cancellable | null): Promise<R
         ...job.env,
     };
     const {cmd, stdin} = splitPercent(lineCommand(job.line));
-    const command = stdin === null
+    const argv = stdin === null
         ? [env.SHELL, '-c', cmd]
         : [env.SHELL, '-c', 'printf "%s" "$1" | "$0" -c "$2"', env.SHELL, stdin.endsWith('\n') ? stdin : `${stdin}\n`, cmd];
-    // systemd-run reaches the user's systemd over the user bus. Name it explicitly: shells started
-    // with dbus-run-session (nested or test sessions) have a private session bus without systemd on it.
-    const userBus = GLib.build_filenamev([GLib.get_user_runtime_dir(), 'bus']);
-    const busEnv: Record<string, string> = GLib.file_test(userBus, GLib.FileTest.EXISTS)
-        ? {DBUS_SESSION_BUS_ADDRESS: `unix:path=${userBus}`} : {};
-    return run(['systemd-run', '--user', '--wait', '--collect', '--quiet',
-        `--unit=cronboard-run-${GLib.get_real_time()}`, `--working-directory=${env.HOME}`,
-        '--', '/usr/bin/env', '-i', ...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...command],
-    null, cancellable, busEnv);
+    const [status, stderr] = (await call('Run', new GLib.Variant('(asa{ss})', [argv, env]), '(is)', cancellable, NO_TIMEOUT))
+        .deepUnpack<[number, string]>();
+    return {status, stderr};
 }
 
 /** False when a known cron service exists but isn't running. */
 export async function cronServiceActive(cancellable: Gio.Cancellable | null = null): Promise<boolean> {
-    let r: Result;
-    try {
-        r = await run(['systemctl', 'is-active', 'cron.service', 'crond.service', 'cronie.service'], null, cancellable);
-    } catch (e) {
-        if (isCancelled(e))
-            throw e;
-        return true; // no systemctl: we can't tell, so don't warn
-    }
-    return /^active$/m.test(r.stdout);
+    const [active] = (await call('CronActive', null, '(b)', cancellable)).deepUnpack<[boolean]>();
+    return active;
 }
 
 /** Last recorded run of a tracked job, or null if none (the status is informational, so errors count as none). */
