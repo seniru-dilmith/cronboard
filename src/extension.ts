@@ -39,7 +39,7 @@ function infoItem(text: string, styleClass?: string): PopupMenu.PopupMenuItem {
 class Indicator {
     private readonly button = new PanelMenu.Button(0.0, 'Cronboard', false);
     private readonly menu = this.button.menu as PopupMenu.PopupMenu;
-    private readonly icon: St.Icon;
+    private icon: St.Icon | null;
     private readonly section = new PopupMenu.PopupMenuSection();
     private readonly cancellable = new Gio.Cancellable();
     private monitor: Gio.FileMonitor | null = null;
@@ -73,6 +73,8 @@ class Indicator {
             this.monitor.cancel();
             this.monitor = null;
         }
+        this.icon?.destroy();
+        this.icon = null;
         this.button.destroy();
     }
 
@@ -121,9 +123,9 @@ class Indicator {
 
     private showFailed(statuses: Map<string, RunStatus>): void {
         if ([...statuses.values()].some(s => s.exit !== 0))
-            this.icon.add_style_class_name('cronboard-failed');
+            this.icon?.add_style_class_name('cronboard-failed');
         else
-            this.icon.remove_style_class_name('cronboard-failed');
+            this.icon?.remove_style_class_name('cronboard-failed');
     }
 
     private row(job: Job, status: RunStatus | undefined, now: Date): Row {
