@@ -1,6 +1,6 @@
 {
   "name": "cronboard",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "GNOME Shell extension for managing your cron jobs from the top panel",
   "private": true,
   "type": "module",
