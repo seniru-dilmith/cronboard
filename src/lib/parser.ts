@@ -8,7 +8,7 @@ import {validate} from './schedule.ts';
 export const DISABLED_MARKER = '#cronboard-disabled# ';
 
 export interface Track {
-    runner: string; // absolute path of cronboard-run
+    dir: string; // absolute folder where the run's log and status are written
     id: string;
 }
 
@@ -41,8 +41,8 @@ export interface JobFields {
 }
 
 const ENV = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/;
-// Tracked jobs run through the wrapper: <runner> <id> '<command>'
-const TRACKED = /^(\S+\/cronboard-run) ([0-9a-f]+) '((?:[^']|'\\'')*)'$/;
+// Tracked jobs record their output and exit status around the command, see trackedCommand().
+const TRACKED = /^mkdir -p '((?:[^']|'\\'')*)'; \( (.*) \) >'.*\/([0-9a-f]+)\.log' 2>&1; echo /;
 
 function unquote(value: string): string {
     const q = value[0];
@@ -58,9 +58,13 @@ function parseJob(text: string): Omit<JobLine, 'kind' | 'raw' | 'enabled'> | nul
         return null;
     const schedule = m[1].split(/\s+/).join(' ');
     const t = TRACKED.exec(m[2]);
-    if (!t)
-        return {schedule, command: m[2]};
-    return {schedule, command: t[3].replaceAll("'\\''", "'"), track: {runner: t[1], id: t[2]}};
+    if (t) {
+        const track = {dir: t[1].replaceAll("'\\''", "'"), id: t[3]};
+        // Only a line that is exactly what we would write counts as tracked; anything else stays a plain command.
+        if (trackedCommand(t[2], track) === m[2])
+            return {schedule, command: t[2], track};
+    }
+    return {schedule, command: m[2]};
 }
 
 // Same order as Debian cron: env assignment first, then job, else leave it alone.
@@ -101,11 +105,23 @@ export function jobs(lines: Line[]): Job[] {
     return out;
 }
 
+const shellQuote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+
+/**
+ * The command wrapped so cron records its output (the last run only) in <dir>/<id>.log and its
+ * exit status and finish time in <dir>/<id>.status, which Cronboard reads for the menu and log viewer.
+ * The status is written under a dot name and renamed so a reader never sees half of it.
+ * ponytail: a dir containing % would need escaping for cron; the state dir is under $HOME, so it's skipped.
+ */
+function trackedCommand(command: string, {dir, id}: Track): string {
+    const at = (name: string) => shellQuote(`${dir}/${name}`);
+    return `mkdir -p ${shellQuote(dir)}; ( ${command} ) >${at(`${id}.log`)} 2>&1; ` +
+        `echo "$? $(date +\\%s)" >${at(`.${id}.status.tmp`)} && mv ${at(`.${id}.status.tmp`)} ${at(`${id}.status`)}`;
+}
+
 /** The command part of the line as cron sees it (wrapped when tracked). */
 export function lineCommand(f: {command: string; track?: Track}): string {
-    if (!f.track)
-        return f.command;
-    return `${f.track.runner} ${f.track.id} '${f.command.replaceAll("'", "'\\''")}'`;
+    return f.track ? trackedCommand(f.command, f.track) : f.command;
 }
 
 export function formatJob(f: JobFields, enabled = true): string {
@@ -194,7 +210,7 @@ export function updateJob(lines: Line[], index: number, f: JobFields): Line[] {
     const line = jobAt(lines, index);
     const oldName = nameAt(lines, index);
     const same = line.schedule === f.schedule && line.command === f.command &&
-        line.track?.id === f.track?.id && line.track?.runner === f.track?.runner;
+        line.track?.id === f.track?.id && line.track?.dir === f.track?.dir;
     const job = same ? line.raw : formatJob(f, line.enabled);
     const name = !f.name ? [] : f.name === oldName ? [lines[index - 1].raw] : [`# ${f.name}`];
     return oldName !== null

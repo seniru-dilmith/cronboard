@@ -50,7 +50,7 @@ Log out and back in once so GNOME Shell loads it.
 
 **Logs:** new jobs get a log file in `~/.local/state/cronboard/logs/`, named after the job, which you can change or clear. Open log shows it and keeps up with it while the job runs. Jobs that already write to a file (`>> ~/logs/backup.log 2>&1`) work the same way.
 
-**Track runs** is optional per job. It records each run's result so the panel can show it. Tracked jobs keep working even if you remove Cronboard, but turn tracking off first if you also plan to delete `~/.local/share/cronboard`.
+**Track runs** is optional per job. It records each run's result so the panel can show it. The crontab line carries a short shell snippet that saves the last run's output and exit status under `~/.local/state/cronboard`, so tracked jobs keep working even if you remove Cronboard. Turn tracking off before uninstalling if you want the line back to just the command.
 
 Only your own crontab is managed, not the root crontab or `/etc/cron.d`.
 
