@@ -54,14 +54,9 @@ export function isCancelled(e: unknown): boolean {
     return e instanceof GLib.Error && e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED);
 }
 
-/** Where tracked jobs record their last run (data/cronboard-run uses the same path). */
+/** Where tracked jobs record their last run (the tracked command in parser.ts writes there). */
 export function stateDir(): string {
     return GLib.build_filenamev([GLib.get_user_state_dir(), 'cronboard']);
-}
-
-/** Where the cronboard-run wrapper is installed, outside the extension folder. */
-export function runnerPath(): string {
-    return GLib.build_filenamev([GLib.get_user_data_dir(), 'cronboard', 'cronboard-run']);
 }
 
 async function run(argv: string[], input: string | null, cancellable: Gio.Cancellable | null,

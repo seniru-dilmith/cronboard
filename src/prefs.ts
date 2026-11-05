@@ -9,7 +9,7 @@ import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import {ConflictError, errorMessage, read, readStatuses, runNow, runnerPath, stateDir, write,
+import {ConflictError, errorMessage, read, readStatuses, runNow, stateDir, write,
     type RunStatus} from './lib/crontab.ts';
 import {addJob, checkCommand, defaultLog, deleteJob, jobs, logFile, parse, serialize, setEnabled, splitLog, updateJob, withLog,
     type Job, type JobFields, type Line, type Track} from './lib/parser.ts';
@@ -36,16 +36,6 @@ function toast(title: string): Adw.Toast {
     return new Adw.Toast({title, use_markup: false, timeout: 6});
 }
 
-/** Copies the bundled wrapper to ~/.local/share/cronboard so tracked jobs keep working without the extension. */
-function installRunner(source: Gio.File): string {
-    const path = runnerPath();
-    GLib.mkdir_with_parents(GLib.path_get_dirname(path), 0o700);
-    const dest = Gio.File.new_for_path(path);
-    source.copy(dest, Gio.FileCopyFlags.OVERWRITE, null, null);
-    dest.set_attribute_uint32('unix::mode', 0o755, Gio.FileQueryInfoFlags.NONE, null);
-    return path;
-}
-
 function forgetRuns(id: string): void {
     for (const ext of ['status', 'log']) {
         try {
@@ -60,25 +50,15 @@ const newTrackId = () => GLib.uuid_string_random().replaceAll('-', '').slice(0, 
 
 class JobsPage {
     private readonly window: Adw.PreferencesWindow;
-    private readonly runnerSource: Gio.File;
     private readonly page = new Adw.PreferencesPage({title: 'Jobs', icon_name: 'alarm-symbolic'});
     private group: Adw.PreferencesGroup | null = null;
     private snapshot: string | null = null; // the crontab text the rows were built from
     private readonly running = new Set<string>(); // raw lines of jobs started with Run now
 
-    constructor(window: Adw.PreferencesWindow, runnerSource: Gio.File) {
+    constructor(window: Adw.PreferencesWindow) {
         this.window = window;
-        this.runnerSource = runnerSource;
         window.set_default_size(680, 720); // room for the editor's preview without scrolling
         window.add(this.page);
-        // Tracked jobs run the installed copy of the wrapper; keep it in step with this version.
-        if (GLib.file_test(runnerPath(), GLib.FileTest.EXISTS)) {
-            try {
-                installRunner(runnerSource);
-            } catch (e) {
-                console.warn(`Cronboard: could not update cronboard-run: ${errorMessage(e)}`);
-            }
-        }
         void this.reload();
     }
 
@@ -378,14 +358,8 @@ class JobsPage {
         suggestLog();
 
         const onSave = async () => {
-            let tracking: Track | undefined;
-            try {
-                if (track.active)
-                    tracking = {runner: installRunner(this.runnerSource), id: job?.line.track?.id ?? newTrackId()};
-            } catch (e) {
-                overlay.add_toast(toast(`Could not install cronboard-run: ${errorMessage(e)}`));
-                return;
-            }
+            const tracking: Track | undefined = track.active
+                ? {dir: stateDir(), id: job?.line.track?.id ?? newTrackId()} : undefined;
             const fields: JobFields = {
                 schedule: expr.text.trim().split(/\s+/).join(' '),
                 command: withLog(command.text.trim(), log.text),
@@ -421,6 +395,6 @@ class JobsPage {
 
 export default class CronboardPreferences extends ExtensionPreferences {
     override fillPreferencesWindow(window: Adw.PreferencesWindow): void {
-        new JobsPage(window, this.dir.get_child('cronboard-run'));
+        new JobsPage(window);
     }
 }

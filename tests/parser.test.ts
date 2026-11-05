@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import {parse, serialize, jobs, setEnabled, updateJob, addJob, deleteJob, splitPercent, logFile, splitLog, withLog, defaultLog, DISABLED_MARKER}
     from '../src/lib/parser.ts';
 
-const RUNNER = '/home/me/.local/share/cronboard/cronboard-run';
+const DIR = '/home/me/.local/state/cronboard';
+const tracked = (id: string, command: string) =>
+    `mkdir -p '${DIR}'; ( ${command} ) >'${DIR}/${id}.log' 2>&1; ` +
+    `echo "$? $(date +\\%s)" >'${DIR}/.${id}.status.tmp' && mv '${DIR}/.${id}.status.tmp' '${DIR}/${id}.status'`;
 const SAMPLE_LINES = [
     '# m h  dom mon dow   command',                                              // 0
     'SHELL=/bin/bash',                                                           // 1
@@ -28,7 +31,7 @@ const SAMPLE_LINES = [
     '61 * * * * bad minute',                                                     // 20
     '   0 3 * * * indented',                                                     // 21
     '0 4 * * * date +\\%F % input',                                              // 22
-    `0 5 * * * ${RUNNER} 1a2b3c4d 'echo it'\\''s fine'`,                         // 23
+    `0 5 * * * ${tracked('1a2b3c4d', 'echo "it\'s fine"')}`,                         // 23
     '#cronboard-disabled# not a job',                                            // 24
 ];
 const SAMPLE = SAMPLE_LINES.join('\n') + '\n';
@@ -61,7 +64,7 @@ test('jobs: commands, names, disabled, tracked', () => {
         'root /usr/bin/system-style',
         'indented',
         'date +\\%F % input',
-        "echo it's fine",
+        'echo "it\'s fine"',
     ]);
     assert.equal(list[0].name, 'Backup photos');
     assert.equal(list[1].name, null);
@@ -69,7 +72,7 @@ test('jobs: commands, names, disabled, tracked', () => {
     assert.equal(list[2].line.enabled, false);
     assert.equal(list[2].line.schedule, '30 6 * * 1');
     assert.equal(list[12].line.schedule, '0 3 * * *');
-    assert.deepEqual(list[14].line.track, {runner: RUNNER, id: '1a2b3c4d'});
+    assert.deepEqual(list[14].line.track, {dir: DIR, id: '1a2b3c4d'});
 });
 
 test('env vars apply to the jobs below them', () => {
@@ -120,14 +123,17 @@ test('updateJob only touches the target lines', () => {
 
 test('updateJob handles tracked jobs', () => {
     const lines = parse(SAMPLE);
-    const fields = {schedule: '0 5 * * *', command: "echo it's fine", name: null};
-    assert.equal(serialize(updateJob(lines, 23, {...fields, track: {runner: RUNNER, id: '1a2b3c4d'}})), SAMPLE);
+    const fields = {schedule: '0 5 * * *', command: 'echo "it\'s fine"', name: null};
+    assert.equal(serialize(updateJob(lines, 23, {...fields, track: {dir: DIR, id: '1a2b3c4d'}})), SAMPLE);
     assert.equal(serialize(updateJob(lines, 23, fields)), edited(l => {
-        l[23] = "0 5 * * * echo it's fine";
+        l[23] = '0 5 * * * echo "it\'s fine"';
     }));
-    const tracked = updateJob(lines, 21, {schedule: '0 3 * * *', command: "say 'hi'", name: null, track: {runner: RUNNER, id: 'ff'}});
-    assert.equal(tracked[21].raw, `0 3 * * * ${RUNNER} ff 'say '\\''hi'\\'''`);
-    assert.equal(tracked[21].kind === 'job' && tracked[21].command, "say 'hi'");
+    const added = updateJob(lines, 21, {schedule: '0 3 * * *', command: "say 'hi'", name: null, track: {dir: DIR, id: 'ff'}});
+    assert.equal(added[21].raw, `0 3 * * * ${tracked('ff', "say 'hi'")}`);
+    assert.equal(added[21].kind === 'job' && added[21].command, "say 'hi'");
+    // A hand-edited wrapper is no longer ours to rewrite, so it stays a plain command.
+    const hand = parse(`0 3 * * * ${tracked('ff', 'x')} ; extra`);
+    assert.equal(jobs(hand)[0].line.track, undefined);
 });
 
 test('addJob appends before the trailing newline', () => {
