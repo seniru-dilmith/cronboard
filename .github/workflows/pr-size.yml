@@ -1,0 +1,31 @@
+name: PR size
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // Lock files and screenshots don't reflect review effort, so they don't count.
+            const ignored = f => f.filename.endsWith('package-lock.json') || f.filename.startsWith('screenshots/');
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo, pull_number: context.issue.number, per_page: 100,
+            });
+            const lines = files.filter(f => !ignored(f)).reduce((n, f) => n + f.additions + f.deletions, 0);
+            const sizes = [[10, 'XS'], [30, 'S'], [100, 'M'], [500, 'L'], [1000, 'XL'], [Infinity, 'XXL']];
+            const size = `size/${sizes.find(([max]) => lines < max)[1]}`;
+
+            const current = context.payload.pull_request.labels.map(l => l.name);
+            for (const name of current.filter(n => n.startsWith('size/') && n !== size))
+              await github.rest.issues.removeLabel({...context.repo, issue_number: context.issue.number, name});
+            if (!current.includes(size))
+              await github.rest.issues.addLabels({...context.repo, issue_number: context.issue.number, labels: [size]});
+            core.info(`${lines} lines changed: ${size}`);
