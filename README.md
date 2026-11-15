@@ -6,7 +6,7 @@
 
 Manage your cron jobs from the GNOME top bar.
 
-![GNOME 46](https://img.shields.io/badge/GNOME-46-4a86cf?logo=gnome&logoColor=white)
+![GNOME 46–50](https://img.shields.io/badge/GNOME-46%E2%80%9350-4a86cf?logo=gnome&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178c6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-GPL--2.0--or--later-2ea44f)
 
