@@ -12,7 +12,7 @@ journalctl -f -o cat /usr/bin/gnome-shell
 
 ## Setting up
 
-You need Node.js 22.6 or newer, Python 3.10 or newer and GNOME Shell 46 or newer.
+You need Node.js 22.6 or newer, Python 3.10 or newer and GNOME Shell 45 or newer.
 
 The extension talks to the companion service in `service/`, so install that too:
 

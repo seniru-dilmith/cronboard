@@ -13,6 +13,7 @@ import {ConflictError, errorMessage, read, readStatuses, runNow, stateDir, write
     type RunStatus} from './lib/crontab.ts';
 import {addJob, checkCommand, defaultLog, deleteJob, jobs, logFile, parse, serialize, setEnabled, splitLog, updateJob, withLog,
     type Job, type JobFields, type Line, type Track} from './lib/parser.ts';
+import {confirm, sheet} from './lib/dialogs.ts';
 import {logDialog} from './logview.ts';
 import {describe, exprToPreset, formatWhen, nextRuns, presetToExpr, validate, type Preset} from './lib/schedule.ts';
 
@@ -32,8 +33,11 @@ function flatButton(icon: string, tooltip: string): Gtk.Button {
     return new Gtk.Button({icon_name: icon, tooltip_text: tooltip, valign: Gtk.Align.CENTER, css_classes: ['flat']});
 }
 
-function toast(title: string): Adw.Toast {
-    return new Adw.Toast({title, use_markup: false, timeout: 6});
+// Plain text only: markup is switched off before the text is set, or a "&" in a command makes GTK log a parse error.
+function toast(title: string, timeout = 6): Adw.Toast {
+    const t = new Adw.Toast({use_markup: false, timeout});
+    t.title = title;
+    return t;
 }
 
 function forgetRuns(id: string): void {
@@ -105,7 +109,9 @@ class JobsPage {
             details.push(line.command);
         if (status)
             details.push(`Last run ${formatWhen(status.finished, now)}: ${status.exit === 0 ? 'OK' : `failed (exit ${status.exit})`}`);
-        const row = new Adw.ActionRow({title: job.name ?? line.command, subtitle: details.join('\n'), use_markup: false});
+        const row = new Adw.ActionRow({use_markup: false});
+        row.title = job.name ?? line.command;
+        row.subtitle = details.join('\n');
 
         const run = flatButton('media-playback-start-symbolic', 'Run now');
         if (this.running.has(line.raw)) {
@@ -177,17 +183,8 @@ class JobsPage {
     }
 
     private confirmRun(job: Job): void {
-        const dialog = new Adw.AlertDialog({heading: 'Run this job now?', body: job.name ?? job.line.command});
-        dialog.add_response('cancel', 'Cancel');
-        dialog.add_response('run', 'Run');
-        dialog.set_response_appearance('run', Adw.ResponseAppearance.SUGGESTED);
-        dialog.set_default_response('cancel');
-        dialog.set_close_response('cancel');
-        dialog.connect('response', (_dialog, response) => {
-            if (response === 'run')
-                void this.run(job);
-        });
-        dialog.present(this.window);
+        confirm(this.window, 'Run this job now?', job.name ?? job.line.command, 'Run', Adw.ResponseAppearance.SUGGESTED,
+            () => void this.run(job));
     }
 
     // Runs it the way cron would (see runNow). The row shows a spinner until it ends, which can take minutes.
@@ -205,7 +202,7 @@ class JobsPage {
         }
         this.running.delete(job.line.raw);
         void this.reload();
-        const done = new Adw.Toast({title: message, use_markup: false, timeout: 10});
+        const done = toast(message, 10);
         if (this.logPaths(job).length > 0) {
             done.button_label = 'Open log';
             done.connect('button-clicked', () => this.openLog(job));
@@ -214,17 +211,8 @@ class JobsPage {
     }
 
     private confirmDelete(job: Job): void {
-        const dialog = new Adw.AlertDialog({heading: 'Delete this job?', body: job.name ?? job.line.command});
-        dialog.add_response('cancel', 'Cancel');
-        dialog.add_response('delete', 'Delete');
-        dialog.set_response_appearance('delete', Adw.ResponseAppearance.DESTRUCTIVE);
-        dialog.set_default_response('cancel');
-        dialog.set_close_response('cancel');
-        dialog.connect('response', (_dialog, response) => {
-            if (response === 'delete')
-                void this.remove(job);
-        });
-        dialog.present(this.window);
+        confirm(this.window, 'Delete this job?', job.name ?? job.line.command, 'Delete', Adw.ResponseAppearance.DESTRUCTIVE,
+            () => void this.remove(job));
     }
 
     private async remove(job: Job): Promise<void> {
@@ -236,7 +224,6 @@ class JobsPage {
     }
 
     private edit(job: Job | null): void {
-        const dialog = new Adw.Dialog({title: job ? 'Edit job' : 'Add job', content_width: 560});
         const cancel = new Gtk.Button({label: 'Cancel'});
         const save = new Gtk.Button({label: 'Save', css_classes: ['suggested-action']});
         const header = new Adw.HeaderBar({show_start_title_buttons: false, show_end_title_buttons: false});
@@ -246,7 +233,7 @@ class JobsPage {
         const view = new Adw.ToolbarView({content: page});
         view.add_top_bar(header);
         const overlay = new Adw.ToastOverlay({child: view});
-        dialog.set_child(overlay);
+        const dialog = sheet(job ? 'Edit job' : 'Add job', overlay, 560);
 
         const name = new Adw.EntryRow({title: 'Name (optional)', text: job?.name ?? ''});
         const split = splitLog(job?.line.command ?? '');

@@ -6,6 +6,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
+import {sheet, type Sheet} from './lib/dialogs.ts';
+
 const LOG_TAIL_BYTES = 256 * 1024; // how much of a long log to show when the window opens
 
 export function openInEditor(path: string): void {
@@ -24,7 +26,7 @@ function completeLength(b: Uint8Array): number {
 }
 
 /** A window showing a log file that keeps up as the job appends to it, like `tail -f`. */
-export function logDialog(title: string, path: string): Adw.Dialog {
+export function logDialog(title: string, path: string): Sheet {
     const file = Gio.File.new_for_path(path);
     const view = new Gtk.TextView({
         editable: false, cursor_visible: false, monospace: true, wrap_mode: Gtk.WrapMode.WORD_CHAR,
@@ -91,11 +93,9 @@ export function logDialog(title: string, path: string): Adw.Dialog {
     header.pack_start(editor);
     const toolbar = new Adw.ToolbarView({content: scroller});
     toolbar.add_top_bar(header);
-    const dialog = new Adw.Dialog({title, content_width: 860, content_height: 600, child: toolbar});
-    dialog.connect('closed', () => {
+    readNew();
+    return sheet(title, toolbar, 860, 600, () => {
         monitor.disconnect(changedId);
         monitor.cancel();
     });
-    readNew();
-    return dialog;
 }
