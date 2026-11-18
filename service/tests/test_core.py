@@ -27,6 +27,8 @@ class CoreTest(unittest.TestCase):
             "PATH": f"{self.tmp}:{os.environ['PATH']}",
             "FAKE_CRONTAB": str(self.tmp / "stored"),
             "XDG_DATA_HOME": str(self.tmp / "data"),
+            "XDG_STATE_HOME": str(self.tmp / "state"),
+            "HOME": str(self.tmp / "home"),
         }
         self.saved = {k: os.environ.get(k) for k in self.env}
         os.environ.update(self.env)
@@ -53,6 +55,38 @@ class CoreTest(unittest.TestCase):
         with self.assertRaises(core.Conflict):
             asyncio.run(core.write("y\n", "something else\n"))
         self.assertEqual(asyncio.run(core.read()), "x\n")
+
+    def test_job_operations(self):
+        asyncio.run(core.write("MAILTO=me\n# Backup\n0 2 * * * backup.sh\n", ""))
+        [job] = asyncio.run(core.list_jobs())
+        self.assertEqual((job["name"], job["description"], job["enabled"]), ("Backup", "every day at 02:00", True))
+
+        asyncio.run(core.set_enabled(job["id"], False))
+        self.assertEqual(asyncio.run(core.read()), "MAILTO=me\n# Backup\n#cronboard-disabled# 0 2 * * * backup.sh\n")
+        with self.assertRaises(core.Conflict):  # the id named the line before it changed
+            asyncio.run(core.set_enabled(job["id"], True))
+
+        [job] = asyncio.run(core.list_jobs())
+        asyncio.run(core.update_job(job["id"], {"name": "Backup", "command": "backup.sh", "log": "~/logs/b.log",
+                                                "schedule": "0 3 * * *", "tracked": True}))
+        [job] = asyncio.run(core.list_jobs())
+        self.assertEqual((job["edit_command"], job["edit_log"], job["tracked"], job["enabled"]),
+                         ("backup.sh", "~/logs/b.log", True, False))
+        self.assertTrue((self.tmp / "home" / "logs").is_dir())
+
+        status = core.state_dir() / f"{job['log_paths'][1].rsplit('/', 1)[1][:-4]}.status"
+        status.parent.mkdir(parents=True)
+        status.write_text("1 1700000000\n")
+        [job] = asyncio.run(core.list_jobs())
+        self.assertEqual(job["last_exit"], 1)
+        asyncio.run(core.delete_job(job["id"]))
+        self.assertEqual(asyncio.run(core.read()), "MAILTO=me\n")
+        self.assertFalse(status.exists())
+
+        with self.assertRaises(core.Invalid):
+            asyncio.run(core.add_job({"command": "x", "schedule": "61 * * * *"}))
+        with self.assertRaises(core.Invalid):
+            asyncio.run(core.add_job({"command": " ", "log": "a.log", "schedule": "@daily"}))
 
     def test_missing_crontab_command(self):
         os.environ["PATH"] = "/nonexistent"
