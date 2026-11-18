@@ -27,7 +27,7 @@ Manage your cron jobs from the GNOME top bar.
 
 ## Install
 
-Cronboard has two parts. The extension shows the menu and preferences, and a small companion service does the work a GNOME Shell extension isn't allowed to do itself: reading and writing your crontab and starting jobs. They talk over the session D-Bus. Install the service first:
+Cronboard has two parts. The extension shows the menu and preferences, and a small companion service does the actual work: it reads and changes your crontab, works out schedules and next runs, and starts jobs. They talk over the session D-Bus, and the extension only shows what the service tells it. Install the service first:
 
 ```sh
 pipx install cronboard-service

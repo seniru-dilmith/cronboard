@@ -36,13 +36,12 @@ npm run install-dev
 ```bash
 npm run build
 npm test
-python -m unittest service/tests/test_core.py
 ```
 
-All three run in CI on every pull request, so they need to pass.
+`npm test` runs the service's tests. Both run in CI on every pull request, so they need to pass.
 
 - Keep a pull request focused on one change.
-- Add or update tests in `tests/` when you change logic.
+- The job logic (crontab parsing, schedules, run tracking) lives in the service, so add or update tests in `service/tests/` when you change it. The extension and preferences only show what the service returns.
 - Match the style of the surrounding code.
 - Explain what changed and why in the description. Screenshots help for UI changes.
 
