@@ -222,7 +222,8 @@ class JobsPage {
         const view = new Adw.ToolbarView({content: page});
         view.add_top_bar(header);
         const overlay = new Adw.ToastOverlay({child: view});
-        const dialog = sheet(job ? 'Edit job' : 'Add job', overlay, 560);
+        // A height is needed: Adw.Dialog (GNOME 46+) otherwise shrinks to the scrolled page's tiny natural height.
+        const dialog = sheet(job ? 'Edit job' : 'Add job', overlay, 560, 640);
 
         const name = new Adw.EntryRow({title: 'Name (optional)', text: job?.name ?? ''});
         const command = new Adw.EntryRow({title: 'Command', text: job?.edit_command ?? ''});
