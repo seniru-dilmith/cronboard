@@ -1,21 +1,19 @@
 // Preferences window: list, add, edit and delete jobs, with a schedule builder,
-// live validation and a preview of the next runs. This runs in its own process,
-// so the few small blocking file operations here don't affect the shell.
+// live validation and a preview of the next runs. The Cronboard service does the
+// work (parsing, validating, saving); this window shows what it returns.
 
 import Adw from 'gi://Adw';
-import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Gtk from 'gi://Gtk';
 
 import {ExtensionPreferences} from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-import {ConflictError, errorMessage, read, readStatuses, runNow, stateDir, write,
-    type RunStatus} from './lib/crontab.ts';
-import {addJob, checkCommand, defaultLog, deleteJob, jobs, logFile, parse, serialize, setEnabled, splitLog, updateJob, withLog,
-    type Job, type JobFields, type Line, type Track} from './lib/parser.ts';
+import {ConflictError, addJob, checkSchedule, deleteJob, errorMessage, listJobs, runNow, setEnabled, updateJob, watchJobs,
+    type Job, type JobFields} from './lib/service.ts';
 import {confirm, sheet} from './lib/dialogs.ts';
 import {logDialog} from './logview.ts';
-import {describe, exprToPreset, formatWhen, nextRuns, presetToExpr, validate, type Preset} from './lib/schedule.ts';
+
+type Preset = 'minute' | 'hourly' | 'daily' | 'weekly' | 'monthly' | 'reboot' | 'custom';
 
 const PRESETS: {id: Preset; label: string}[] = [
     {id: 'minute', label: 'Every minute'},
@@ -29,6 +27,25 @@ const PRESETS: {id: Preset; label: string}[] = [
 const WEEKDAYS = [1, 2, 3, 4, 5, 6, 0]; // combo row order, Monday first
 const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
+/** The expression a preset's rows stand for (the service maps expressions back to presets). */
+function presetToExpr(preset: Exclude<Preset, 'custom'>, o: {minute: number; hour: number; weekday: number; day: number}): string {
+    switch (preset) {
+    case 'minute': return '* * * * *';
+    case 'hourly': return `${o.minute} * * * *`;
+    case 'daily': return `${o.minute} ${o.hour} * * *`;
+    case 'weekly': return `${o.minute} ${o.hour} * * ${o.weekday}`;
+    case 'monthly': return `${o.minute} ${o.hour} ${o.day} * *`;
+    case 'reboot': return '@reboot';
+    }
+}
+
+/** A log file to suggest for a new job, named after the job or its program. */
+function defaultLog(name: string, command: string): string {
+    const program = command.trim().split(/\s+/)[0]?.split('/').pop()?.replace(/\.\w+$/, '') ?? '';
+    const slug = (name.trim() || program).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    return `~/.local/state/cronboard/logs/${slug || 'job'}.log`;
+}
+
 function flatButton(icon: string, tooltip: string): Gtk.Button {
     return new Gtk.Button({icon_name: icon, tooltip_text: tooltip, valign: Gtk.Align.CENTER, css_classes: ['flat']});
 }
@@ -40,29 +57,25 @@ function toast(title: string, timeout = 6): Adw.Toast {
     return t;
 }
 
-function forgetRuns(id: string): void {
-    for (const ext of ['status', 'log']) {
-        try {
-            Gio.File.new_for_path(GLib.build_filenamev([stateDir(), `${id}.${ext}`])).delete(null);
-        } catch {
-            // Best effort: usually the file just doesn't exist.
-        }
-    }
-}
-
-const newTrackId = () => GLib.uuid_string_random().replaceAll('-', '').slice(0, 8);
+const title = (job: Job) => job.name || job.command;
 
 class JobsPage {
     private readonly window: Adw.PreferencesWindow;
     private readonly page = new Adw.PreferencesPage({title: 'Jobs', icon_name: 'alarm-symbolic'});
     private group: Adw.PreferencesGroup | null = null;
-    private snapshot: string | null = null; // the crontab text the rows were built from
-    private readonly running = new Set<string>(); // raw lines of jobs started with Run now
+    private readable = false; // whether the last reload got the jobs
+    private readonly running = new Set<string>(); // ids of jobs started with Run now
 
     constructor(window: Adw.PreferencesWindow) {
         this.window = window;
         window.set_default_size(680, 720); // room for the editor's preview without scrolling
         window.add(this.page);
+        watchJobs(() => void this.reload(), null).then(unwatch => {
+            window.connect('close-request', () => {
+                unwatch();
+                return false;
+            });
+        }).catch(e => console.warn(`Cronboard: not watching for job changes: ${errorMessage(e)}`));
         void this.reload();
     }
 
@@ -70,17 +83,15 @@ class JobsPage {
         let list: Job[] = [];
         let error: string | null = null;
         try {
-            this.snapshot = await read();
-            list = jobs(parse(this.snapshot));
+            list = await listJobs();
         } catch (e) {
-            this.snapshot = null;
             error = `Could not read the crontab: ${errorMessage(e)}`;
         }
-        const statuses = await readStatuses(list.flatMap(j => j.line.track ? [j.line.track.id] : []), null);
-        this.show(list, statuses, error);
+        this.readable = error === null;
+        this.show(list, error);
     }
 
-    private show(list: Job[], statuses: Map<string, RunStatus>, error: string | null): void {
+    private show(list: Job[], error: string | null): void {
         if (this.group)
             this.page.remove(this.group);
         // GObject rejects `description: undefined`, so the key is only passed when there's an error to show.
@@ -89,39 +100,35 @@ class JobsPage {
             ...(error ? {description: GLib.markup_escape_text(error, -1)} : {}),
         });
         const add = flatButton('list-add-symbolic', 'Add job');
-        add.sensitive = this.snapshot !== null;
+        add.sensitive = this.readable;
         add.connect('clicked', () => this.edit(null));
         this.group.set_header_suffix(add);
         if (list.length === 0 && error === null)
             this.group.add(new Adw.ActionRow({title: 'No cron jobs yet', subtitle: 'Use + to add one.'}));
-        const now = new Date();
         for (const job of list)
-            this.group.add(this.row(job, job.line.track ? statuses.get(job.line.track.id) : undefined, now));
+            this.group.add(this.row(job));
         this.page.add(this.group);
     }
 
-    private row(job: Job, status: RunStatus | undefined, now: Date): Adw.ActionRow {
-        const {line} = job;
-        const next = line.enabled ? nextRuns(line.schedule, now, 1)[0] : undefined;
-        const details = [describe(line.schedule) +
-            (next ? ` · next ${formatWhen(next, now)}` : '') + (line.enabled ? '' : ' · disabled')];
+    private row(job: Job): Adw.ActionRow {
+        const details = [job.description + (job.next_run ? ` · next ${job.next_run}` : '') + (job.enabled ? '' : ' · disabled')];
         if (job.name)
-            details.push(line.command);
-        if (status)
-            details.push(`Last run ${formatWhen(status.finished, now)}: ${status.exit === 0 ? 'OK' : `failed (exit ${status.exit})`}`);
+            details.push(job.command);
+        if (job.last_run)
+            details.push(`Last run ${job.last_run}: ${job.last_exit === 0 ? 'OK' : `failed (exit ${job.last_exit})`}`);
         const row = new Adw.ActionRow({use_markup: false});
-        row.title = job.name ?? line.command;
+        row.title = title(job);
         row.subtitle = details.join('\n');
 
         const run = flatButton('media-playback-start-symbolic', 'Run now');
-        if (this.running.has(line.raw)) {
+        if (this.running.has(job.id)) {
             run.set_child(new Gtk.Spinner({spinning: true}));
             run.sensitive = false;
             run.tooltip_text = 'Running…';
         }
         run.connect('clicked', () => this.confirmRun(job));
         row.add_suffix(run);
-        if (this.logPaths(job).length > 0) {
+        if (job.log_paths.length > 0) {
             const log = flatButton('text-x-generic-symbolic', 'Open log');
             log.connect('clicked', () => this.openLog(job));
             row.add_suffix(log);
@@ -130,22 +137,21 @@ class JobsPage {
         edit.connect('clicked', () => this.edit(job));
         const remove = flatButton('user-trash-symbolic', 'Delete');
         remove.connect('clicked', () => this.confirmDelete(job));
-        const enabled = new Gtk.Switch({active: line.enabled, valign: Gtk.Align.CENTER, tooltip_text: 'Enabled'});
-        enabled.connect('notify::active', () => void this.applyOrToast(lines => setEnabled(lines, job.index, enabled.active)));
+        const enabled = new Gtk.Switch({active: job.enabled, valign: Gtk.Align.CENTER, tooltip_text: 'Enabled'});
+        enabled.connect('notify::active', () => void this.applyOrToast(() => setEnabled(job.id, enabled.active)));
         row.add_suffix(edit);
         row.add_suffix(remove);
         row.add_suffix(enabled);
         return row;
     }
 
-    /** Applies a change to the crontab and reloads. Resolves to an error message, or null on success. */
-    private async apply(change: (lines: Line[]) => Line[]): Promise<string | null> {
-        const snapshot = this.snapshot;
-        if (snapshot === null)
+    /** Sends a change to the service and reloads. Resolves to an error message, or null on success. */
+    private async apply(change: () => Promise<void>): Promise<string | null> {
+        if (!this.readable)
             return "Can't save: the crontab couldn't be read.";
-        this.page.sensitive = false; // one write at a time
+        this.page.sensitive = false; // one change at a time
         try {
-            await write(serialize(change(parse(snapshot))), snapshot);
+            await change();
             return null;
         } catch (e) {
             return e instanceof ConflictError ? e.message : `Could not save: ${errorMessage(e)}`;
@@ -155,55 +161,46 @@ class JobsPage {
         }
     }
 
-    private async applyOrToast(change: (lines: Line[]) => Line[]): Promise<void> {
+    private async applyOrToast(change: () => Promise<void>): Promise<void> {
         const error = await this.apply(change);
         if (error)
             this.window.add_toast(toast(error));
     }
 
-    // The file the job's command writes its output to, then the output Track runs keeps.
-    private logPaths(job: Job): string[] {
-        const own = logFile(job.line.command, GLib.get_home_dir());
-        const tracked = job.line.track ? GLib.build_filenamev([stateDir(), `${job.line.track.id}.log`]) : null;
-        return [own, tracked].filter((p): p is string => p !== null);
-    }
-
     private openLog(job: Job): void {
-        const paths = this.logPaths(job);
-        const path = paths.find(p => GLib.file_test(p, GLib.FileTest.EXISTS));
+        const path = job.log_paths.find(p => GLib.file_test(p, GLib.FileTest.EXISTS));
         if (!path) {
-            this.window.add_toast(toast(`No log yet: ${paths[0]} doesn't exist`));
+            this.window.add_toast(toast(`No log yet: ${job.log_paths[0]} doesn't exist`));
             return;
         }
         try {
-            logDialog(job.name ?? job.line.command, path).present(this.window);
+            logDialog(title(job), path).present(this.window);
         } catch (e) {
             this.window.add_toast(toast(`Couldn't open ${path}: ${errorMessage(e)}`));
         }
     }
 
     private confirmRun(job: Job): void {
-        confirm(this.window, 'Run this job now?', job.name ?? job.line.command, 'Run', Adw.ResponseAppearance.SUGGESTED,
+        confirm(this.window, 'Run this job now?', title(job), 'Run', Adw.ResponseAppearance.SUGGESTED,
             () => void this.run(job));
     }
 
     // Runs it the way cron would (see runNow). The row shows a spinner until it ends, which can take minutes.
     private async run(job: Job): Promise<void> {
-        const title = job.name ?? job.line.command;
-        this.running.add(job.line.raw);
+        this.running.add(job.id);
         void this.reload();
         let message: string;
         try {
-            const r = await runNow(job, null);
-            message = r.stderr.trim() ? `Couldn't start ${title}: ${r.stderr.trim()}`
-                : r.status === 0 ? `${title} finished` : `${title} failed (exit ${r.status})`;
+            const r = await runNow(job.id, null);
+            message = r.stderr.trim() ? `Couldn't start ${title(job)}: ${r.stderr.trim()}`
+                : r.status === 0 ? `${title(job)} finished` : `${title(job)} failed (exit ${r.status})`;
         } catch (e) {
-            message = `Couldn't start ${title}: ${errorMessage(e)}`;
+            message = `Couldn't start ${title(job)}: ${errorMessage(e)}`;
         }
-        this.running.delete(job.line.raw);
+        this.running.delete(job.id);
         void this.reload();
         const done = toast(message, 10);
-        if (this.logPaths(job).length > 0) {
+        if (job.log_paths.length > 0) {
             done.button_label = 'Open log';
             done.connect('button-clicked', () => this.openLog(job));
         }
@@ -211,16 +208,8 @@ class JobsPage {
     }
 
     private confirmDelete(job: Job): void {
-        confirm(this.window, 'Delete this job?', job.name ?? job.line.command, 'Delete', Adw.ResponseAppearance.DESTRUCTIVE,
-            () => void this.remove(job));
-    }
-
-    private async remove(job: Job): Promise<void> {
-        const error = await this.apply(lines => deleteJob(lines, job.index));
-        if (error)
-            this.window.add_toast(toast(error));
-        else if (job.line.track)
-            forgetRuns(job.line.track.id);
+        confirm(this.window, 'Delete this job?', title(job), 'Delete', Adw.ResponseAppearance.DESTRUCTIVE,
+            () => void this.applyOrToast(() => deleteJob(job.id)));
     }
 
     private edit(job: Job | null): void {
@@ -236,13 +225,12 @@ class JobsPage {
         const dialog = sheet(job ? 'Edit job' : 'Add job', overlay, 560);
 
         const name = new Adw.EntryRow({title: 'Name (optional)', text: job?.name ?? ''});
-        const split = splitLog(job?.line.command ?? '');
-        const command = new Adw.EntryRow({title: 'Command', text: split.command});
-        const log = new Adw.EntryRow({title: 'Log file (optional)', text: split.log ?? ''});
+        const command = new Adw.EntryRow({title: 'Command', text: job?.edit_command ?? ''});
+        const log = new Adw.EntryRow({title: 'Log file (optional)', text: job?.edit_log ?? ''});
         const track = new Adw.SwitchRow({
             title: 'Track runs',
             subtitle: 'Show the last result in the panel menu',
-            active: Boolean(job?.line.track),
+            active: job?.tracked ?? false,
         });
         const jobGroup = new Adw.PreferencesGroup();
         jobGroup.add(name);
@@ -255,7 +243,7 @@ class JobsPage {
         const minute = new Adw.SpinRow({title: 'Minute', adjustment: new Gtk.Adjustment({lower: 0, upper: 59, step_increment: 1})});
         const weekday = new Adw.ComboRow({title: 'Day of the week', model: Gtk.StringList.new(WEEKDAY_NAMES)});
         const day = new Adw.SpinRow({title: 'Day of the month', adjustment: new Gtk.Adjustment({lower: 1, upper: 31, step_increment: 1})});
-        const expr = new Adw.EntryRow({title: 'Cron expression', text: job?.line.schedule ?? '0 9 * * *'});
+        const expr = new Adw.EntryRow({title: 'Cron expression', text: job?.schedule ?? '0 9 * * *'});
         const preview = new Adw.ActionRow({title: '', use_markup: false});
         const scheduleGroup = new Adw.PreferencesGroup({title: 'Schedule'});
         for (const row of [preset, hour, minute, weekday, day, expr, preview])
@@ -265,32 +253,22 @@ class JobsPage {
 
         // The preset rows and the expression update each other; `syncing` stops the echo.
         let syncing = false;
+        let scheduleOk = false;
+        let checks = 0; // only the answer to the latest check is shown
         const showOptions = (p: Preset) => {
             hour.visible = p === 'daily' || p === 'weekly' || p === 'monthly';
             minute.visible = hour.visible || p === 'hourly';
             weekday.visible = p === 'weekly';
             day.visible = p === 'monthly';
         };
+        // The service has the final say on save; this only greys out Save for an empty command.
         const validity = () => {
-            const scheduleError = validate(expr.text);
-            const commandError = checkCommand(command.text);
-            if (scheduleError) {
-                expr.add_css_class('error');
-                preview.title = scheduleError;
-                preview.subtitle = '';
-            } else {
-                expr.remove_css_class('error');
-                const now = new Date();
-                const runs = nextRuns(expr.text, now, 5);
-                preview.title = describe(expr.text);
-                preview.subtitle = runs.length > 0 ? `Next: ${runs.map(d => formatWhen(d, now)).join(', ')}`
-                    : expr.text.trim() === '@reboot' ? 'Runs when the computer starts' : 'Never runs: no date matches';
-            }
-            if (commandError && command.text !== '')
+            const commandOk = command.text.trim() !== '';
+            if (!commandOk && command.text !== '')
                 command.add_css_class('error');
             else
                 command.remove_css_class('error');
-            save.sensitive = !scheduleError && !commandError;
+            save.sensitive = scheduleOk && commandOk;
         };
         const fromPreset = () => {
             if (syncing)
@@ -307,17 +285,39 @@ class JobsPage {
                 day: Math.round(day.value),
             });
             syncing = false;
-            validity();
         };
-        const fromExpr = () => {
-            if (!syncing) {
-                const {preset: p, options} = exprToPreset(expr.text);
+        const fromExpr = async () => {
+            const typed = !syncing; // typed by hand, rather than written by fromPreset
+            const id = ++checks;
+            let check;
+            try {
+                check = await checkSchedule(expr.text);
+            } catch (e) {
+                if (id === checks) {
+                    scheduleOk = false;
+                    preview.title = errorMessage(e);
+                    preview.subtitle = '';
+                    validity();
+                }
+                return;
+            }
+            if (id !== checks)
+                return;
+            scheduleOk = !check.error;
+            if (check.error)
+                expr.add_css_class('error');
+            else
+                expr.remove_css_class('error');
+            preview.title = check.error || check.description;
+            preview.subtitle = check.next;
+            if (typed) {
+                const p = check.preset as Preset;
                 syncing = true;
                 preset.selected = PRESETS.findIndex(x => x.id === p);
-                hour.value = options.hour;
-                minute.value = options.minute;
-                day.value = options.day;
-                weekday.selected = WEEKDAYS.indexOf(options.weekday);
+                hour.value = check.hour;
+                minute.value = check.minute;
+                day.value = check.day;
+                weekday.selected = WEEKDAYS.indexOf(check.weekday);
                 syncing = false;
                 showOptions(p);
             }
@@ -327,9 +327,10 @@ class JobsPage {
         weekday.connect('notify::selected', fromPreset);
         for (const spin of [hour, minute, day])
             spin.connect('notify::value', fromPreset);
-        expr.connect('changed', fromExpr);
+        expr.connect('changed', () => void fromExpr());
         command.connect('changed', validity);
-        fromExpr();
+        save.sensitive = false;
+        void fromExpr();
 
         // New jobs get a suggested log file that follows the name until the field is edited.
         let logFollows = !job;
@@ -345,34 +346,18 @@ class JobsPage {
         suggestLog();
 
         const onSave = async () => {
-            const tracking: Track | undefined = track.active
-                ? {dir: stateDir(), id: job?.line.track?.id ?? newTrackId()} : undefined;
             const fields: JobFields = {
-                schedule: expr.text.trim().split(/\s+/).join(' '),
-                command: withLog(command.text.trim(), log.text),
-                name: name.text.replace(/\s+/g, ' ').trim() || null,
-                track: tracking,
+                name: name.text,
+                command: command.text,
+                log: log.text,
+                schedule: expr.text,
+                tracked: track.active,
             };
-            // Cron can't write the log if its folder is missing; relative paths are from $HOME, like cron's.
-            const logPath = log.text.trim().replace(/^~(?=\/)/, GLib.get_home_dir());
-            if (logPath) {
-                const abs = GLib.path_is_absolute(logPath) ? logPath : GLib.build_filenamev([GLib.get_home_dir(), logPath]);
-                GLib.mkdir_with_parents(GLib.path_get_dirname(abs), 0o700);
-            }
-            const error = await this.apply(lines => {
-                // After a failed save the crontab is reloaded; make sure this is still the same line.
-                if (job && lines[job.index]?.raw !== job.line.raw)
-                    throw new Error('this job was changed outside Cronboard. Close this dialog and edit it again.');
-                return job ? updateJob(lines, job.index, fields) : addJob(lines, fields);
-            });
-            if (error) {
+            const error = await this.apply(() => job ? updateJob(job.id, fields) : addJob(fields));
+            if (error)
                 overlay.add_toast(toast(error));
-                return;
-            }
-            const oldId = job?.line.track?.id;
-            if (oldId && !tracking)
-                forgetRuns(oldId);
-            dialog.close();
+            else
+                dialog.close();
         };
         save.connect('clicked', () => void onSave());
         cancel.connect('clicked', () => dialog.close());
