@@ -10,8 +10,7 @@
 
 <!-- Commands you ran, and anything you checked by hand in a GNOME session. -->
 
-- [ ] `npm run build` and `npm test` pass
-- [ ] `python -m unittest service/tests/test_core.py` passes (if `service/` changed)
+- [ ] `npm run build` and `npm test` (the service tests) pass
 - [ ] Tried in GNOME Shell (if the extension or preferences changed)
 
 ## Screenshots
